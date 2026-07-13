@@ -1,83 +1,9 @@
 import { Request, Response } from "express";
 import dns from "dns";
-import path from "path";
-import os from "os";
-import fs from "fs";
-import { createRequire } from "module";
 import MetaApiPkg from "metaapi.cloud-sdk/node";
 const MetaApi = (MetaApiPkg as any).default || MetaApiPkg;
 const SynchronizationListener = (MetaApiPkg as any).SynchronizationListener;
 import { collection, query, where, getDocs } from "firebase/firestore";
-
-// ==========================================
-// METATRADER SECURE RUNTIME STORAGE PATCH
-// ==========================================
-// We redirect all MetaApi disk caching and telemetry logging from the workspace to the system temp directory (/tmp).
-// This:
-// 1. Prevents locking of binary database cache files (.bin) in the workspace by active Node.js processes.
-//    (Locking is the direct root-cause why Git / GitHub push fails with "Failed to push commit to GitHub").
-// 2. Keeps the workspace 100% clean and free of untracked build/cache pollution.
-// 3. Guarantees that GitHub exports and platform push commits execute perfectly.
-try {
-  const localMetaapiPath = path.join(process.cwd(), ".metaapi");
-  if (fs.existsSync(localMetaapiPath)) {
-    console.log(`[PATCH] Found local .metaapi directory in workspace. Cleaning up...`);
-    fs.rmSync(localMetaapiPath, { recursive: true, force: true });
-    console.log(`[PATCH] ✅ Local .metaapi directory successfully removed.`);
-  }
-} catch (cleanupErr: any) {
-  console.warn(`[PATCH] Failed to delete local .metaapi directory:`, cleanupErr.message || cleanupErr);
-}
-
-// Runtime-level require to bypass bundler/tsx translation and potential path rewriting (.js.js)
-const require = createRequire(import.meta.url);
-
-// 1. Patch FilesystemHistoryDatabase
-try {
-  const FilesystemHistoryDatabase = require("metaapi.cloud-sdk/dist/metaApi/historyDatabase/filesystemHistoryDatabase.js").default;
-  if (FilesystemHistoryDatabase && FilesystemHistoryDatabase.prototype) {
-    FilesystemHistoryDatabase.prototype._getDbLocation = async function (accountId: string, application: string) {
-      const dir = path.join(os.tmpdir(), ".metaapi");
-      await fs.promises.mkdir(dir, { recursive: true });
-      return {
-        dealsFile: path.join(dir, `${accountId}-${application}-deals.bin`),
-        historyOrdersFile: path.join(dir, `${accountId}-${application}-historyOrders.bin`),
-      };
-    };
-    console.log("[PATCH] ✅ Successfully redirected FilesystemHistoryDatabase cache to /tmp/.metaapi");
-  } else {
-    console.warn("[PATCH] FilesystemHistoryDatabase could not be loaded or lacks prototype.");
-  }
-} catch (err: any) {
-  console.error("[PATCH] ❌ FilesystemHistoryDatabase patch failed:", err.message || err);
-}
-
-// 2. Patch PacketLogger
-try {
-  const PacketLogger = require("metaapi.cloud-sdk/dist/clients/metaApi/packetLogger.js").default;
-  if (PacketLogger && PacketLogger.prototype) {
-    let _rootVal = path.join(os.tmpdir(), ".metaapi/logs");
-    Object.defineProperty(PacketLogger.prototype, "_root", {
-      get() {
-        return _rootVal;
-      },
-      set(val) {
-        if (typeof val === "string" && val.startsWith("./.metaapi")) {
-          _rootVal = val.replace("./.metaapi", path.join(os.tmpdir(), ".metaapi"));
-        } else {
-          _rootVal = val;
-        }
-      },
-      configurable: true,
-      enumerable: true
-    });
-    console.log("[PATCH] ✅ Successfully redirected PacketLogger logs to /tmp/.metaapi/logs");
-  } else {
-    console.warn("[PATCH] PacketLogger could not be loaded or lacks prototype.");
-  }
-} catch (err: any) {
-  console.error("[PATCH] ❌ PacketLogger patch failed:", err.message || err);
-}
 
 // Safe dynamic node-fetch import for fallback queries
 const fetch = (...args: any[]) => import("node-fetch").then(({ default: fetch }) => (fetch as any)(...args));
@@ -395,16 +321,8 @@ class MT5BackgroundSyncRegistry {
 
       // Retrieve streaming connection
       const connection = account.getStreamingConnection();
-      await withTimeout(
-        connection.connect(),
-        10000,
-        "Streaming WebSocket connection timed out."
-      );
-      await withTimeout(
-        connection.waitSynchronized(),
-        15000,
-        "Streaming subscription synchronization timed out."
-      );
+      await connection.connect();
+      await connection.waitSynchronized();
 
       // Register live synchronization listener
       const listener = new CustomSyncListener(email, accountId, connection);
@@ -423,16 +341,12 @@ class MT5BackgroundSyncRegistry {
     } catch (err: any) {
       console.error(`[REGISTRY] Connection setup failed for ${accountId}:`, err.message || err);
       
-      const errMsg = (err.message || "").toLowerCase();
-      const isQuotaError = errMsg.includes("quota") || errMsg.includes("limit") || errMsg.includes("toomanyrequestserror") || err.status === 429;
-      const isSyncOrTimeoutError = errMsg.includes("timeout") || errMsg.includes("subscribe") || errMsg.includes("region") || errMsg.includes("not connected") || errMsg.includes("synchroniz");
-
-      if (isQuotaError || isSyncOrTimeoutError) {
-        console.log(`[REGISTRY] ⚠️ Streaming subscription or quota issue for ${accountId} (${email}). Falling back to poll-based RPC background sync.`);
+      // If we hit subscription quota limit, fallback to poll-based RPC sync immediately
+      if (err.message && (err.message.includes("quota") || err.message.includes("limit") || err.message.includes("TooManyRequestsError") || err.status === 429)) {
+        console.log(`[REGISTRY] ⚠️ Streaming quota limit reached. Falling back to poll-based RPC background sync for ${accountId} (${email})`);
         this.startRpcPollSync(accountId, email, token);
       } else {
         // Attempt scheduled reconnection
-        console.log(`[REGISTRY] Scheduling reconnection attempt in 60s for ${accountId} (${email})`);
         setTimeout(() => this.startSync(accountId, email, token), 60000);
       }
     }
@@ -671,150 +585,23 @@ export async function handleGetConfig(req: Request, res: Response) {
 }
 
 /**
- * Helper: Promise with timeout wrapper to prevent hanging operations
- */
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
-  let timer: NodeJS.Timeout;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const err = new Error(errorMessage);
-      (err as any).isTimeout = true;
-      reject(err);
-    }, timeoutMs);
-  });
-  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
-}
-
-/**
  * POST /api/connect-mt5
  * Completely rewritten secure connection proxy using the latest MetaApi JavaScript SDK.
  */
 export async function handleConnectMT5(req: Request, res: Response) {
-  const { login, password, server, email, useSandbox } = req.body;
+  const { login, password, server, email } = req.body;
 
   console.log("[CONNECT API] Initiating connection request:", {
     login,
     server,
     hasPassword: !!password,
-    email,
-    useSandbox: !!useSandbox
+    email
   });
 
   if (!login || !password || !server) {
     return res.status(400).json({
       success: false,
       error: "Missing required login, password, or server. Please fill in all fields."
-    });
-  }
-
-  // Intercept and handle Sandbox Mode instantly
-  if (useSandbox || server === "sandbox_demo_server" || login === "demo_sandbox") {
-    console.log(`[CONNECT API] Connecting to sandbox simulation for user ${email}`);
-    const accountId = "mt5-sandbox-demo";
-    
-    // Seed some initial sandbox trades if the user has none
-    const initialTrades = [
-      {
-        id: "mt5-deal-802101",
-        pair: "EURUSD",
-        type: "BUY",
-        risk: 1,
-        pl: 154.20,
-        emotion: "Disciplined",
-        date: new Date(Date.now() - 24 * 3600000).toISOString().split("T")[0],
-        notes: "MT5 Sandbox Trade. Smooth entry at support level.",
-        source: "mt5",
-        mt5DealId: "802101",
-        volume: 1.5,
-        commission: -7.50,
-        swap: 0,
-        ticket: "802101",
-        symbol: "EURUSD",
-        buySell: "BUY",
-        openTime: new Date(Date.now() - 26 * 3600000).toISOString(),
-        closeTime: new Date(Date.now() - 24 * 3600000).toISOString(),
-        openPrice: 1.0854,
-        closePrice: 1.0864,
-        stopLoss: 1.0820,
-        takeProfit: 1.0900,
-        profit: 161.70,
-        magicNumber: 1001,
-        comment: "Sandbox Demo"
-      },
-      {
-        id: "mt5-deal-802102",
-        pair: "GBPUSD",
-        type: "SELL",
-        risk: 1,
-        pl: -92.50,
-        emotion: "Disciplined",
-        date: new Date(Date.now() - 12 * 3600000).toISOString().split("T")[0],
-        notes: "MT5 Sandbox Trade. Caught resistance breakout.",
-        source: "mt5",
-        mt5DealId: "802102",
-        volume: 1.0,
-        commission: -5.00,
-        swap: 0,
-        ticket: "802102",
-        symbol: "GBPUSD",
-        buySell: "SELL",
-        openTime: new Date(Date.now() - 14 * 3600000).toISOString(),
-        closeTime: new Date(Date.now() - 12 * 3600000).toISOString(),
-        openPrice: 1.2642,
-        closePrice: 1.2651,
-        stopLoss: 1.2680,
-        takeProfit: 1.2580,
-        profit: -87.50,
-        magicNumber: 1001,
-        comment: "Sandbox Demo"
-      },
-      {
-        id: "mt5-deal-802103",
-        pair: "XAUUSD",
-        type: "BUY",
-        risk: 2,
-        pl: 425.00,
-        emotion: "Disciplined",
-        date: new Date().toISOString().split("T")[0],
-        notes: "MT5 Sandbox Gold Trade. Strong trend continuation.",
-        source: "mt5",
-        mt5DealId: "802103",
-        volume: 2.0,
-        commission: -10.00,
-        swap: -1.50,
-        ticket: "802103",
-        symbol: "XAUUSD",
-        buySell: "BUY",
-        openTime: new Date(Date.now() - 4 * 3600000).toISOString(),
-        closeTime: new Date().toISOString(),
-        openPrice: 2024.50,
-        closePrice: 2026.65,
-        stopLoss: 2018.00,
-        takeProfit: 2040.00,
-        profit: 436.50,
-        magicNumber: 1001,
-        comment: "Sandbox Demo"
-      }
-    ];
-
-    const accountInfo = {
-      balance: 12450.00,
-      equity: 12610.50,
-      broker: "MetaApi Demo Sandbox Broker",
-      currency: "USD"
-    };
-
-    if (email) {
-      await saveSyncedDataToDatabase(email, accountId, initialTrades, accountInfo);
-      syncRegistry.startMockSync(accountId, email);
-    }
-
-    return res.json({
-      success: true,
-      accountId: accountId,
-      tradesImported: initialTrades.length,
-      accountInfo,
-      message: "Successfully connected to MetaTrader 5 via Demo Sandbox Simulation!"
     });
   }
 
@@ -862,20 +649,12 @@ export async function handleConnectMT5(req: Request, res: Response) {
       await account.deploy();
     }
 
-    console.log(`[CONNECT API] Waiting for account deployment to connect... (Max 15s timeout)`);
-    await withTimeout(
-      account.waitConnected(),
-      15000,
-      "MT5 account deployment or broker resolution timed out. This often happens if the broker's server name is slow to resolve or credentials need validation. Please try connecting via Sandbox Simulation Mode instead."
-    );
+    console.log(`[CONNECT API] Waiting for account deployment to connect...`);
+    await account.waitConnected();
 
-    console.log(`[CONNECT API] Establishing RPC connection... (Max 10s timeout)`);
+    console.log(`[CONNECT API] Establishing RPC connection...`);
     const connection = account.getRPCConnection();
-    await withTimeout(
-      connection.connect(),
-      10000,
-      "MT5 RPC connection timeout. Gateway secure tunnel busy."
-    );
+    await connection.connect();
 
     console.log(`[CONNECT API] Fetching account information via RPC...`);
     const accountInfo = await connection.getAccountInformation();
@@ -910,11 +689,9 @@ export async function handleConnectMT5(req: Request, res: Response) {
     const diag = categorizeMetaApiError(err);
     return res.status(400).json({
       success: false,
-      error: err.isTimeout
-        ? err.message
-        : (diag.isNetworkError
-          ? `MetaApi Connection Failure: ${diag.message}`
-          : `MT5 Registration Failure: ${err.message || String(err)}. Please check your MT5 credentials.`)
+      error: diag.isNetworkError
+        ? `MetaApi Connection Failure: ${diag.message}`
+        : `MT5 Registration Failure: ${err.message || String(err)}. Please check your MT5 credentials.`
     });
   }
 }

@@ -138,52 +138,6 @@ export default function MT5ConnectionPanel({
     }
   };
 
-  const handleConnectSandbox = async () => {
-    setError("");
-    setSuccessMsg("");
-    setLoading(true);
-
-    try {
-      const response = await fetch("/api/connect-mt5", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          login: "demo_sandbox",
-          password: "demo",
-          server: "sandbox_demo_server",
-          email,
-          useSandbox: true
-        })
-      });
-      const data = await response.json();
-
-      if (data.success) {
-        await updateUserProfile(email, {
-          mt5Connected: true,
-          mt5AccountId: data.accountId,
-          mt5Broker: data.accountInfo?.broker || "MetaApi Demo Sandbox Broker",
-          mt5Balance: data.accountInfo?.balance || 12450.00,
-          mt5Equity: data.accountInfo?.equity || 12610.50,
-          mt5SyncedAt: new Date().toISOString()
-        });
-
-        setSuccessMsg(data.message || "Connected to MT5 Sandbox simulation!");
-        setTimeout(() => {
-          onConnected(
-            data.accountId,
-            data.accountInfo?.broker || "MetaApi Demo Sandbox Broker"
-          );
-        }, 1200);
-      } else {
-        setError(data.error || "Sandbox connection failed.");
-      }
-    } catch (err) {
-      setError("Failed to connect to the Sandbox secure simulation.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleDisconnect = async () => {
     setLoading(true);
     try {
@@ -366,24 +320,9 @@ export default function MT5ConnectionPanel({
       )}
 
       {error && (
-        <div className="my-3.5 p-3.5 rounded-xl bg-rose-950/20 border border-rose-900/30 text-rose-400 text-xs font-medium space-y-2.5">
-          <div className="flex items-center gap-2">
-            <ShieldAlert size={14} className="shrink-0" />
-            <span>{error}</span>
-          </div>
-          <div className="border-t border-rose-900/20 pt-2 flex flex-col gap-1.5">
-            <p className="text-[10px] text-zinc-400 leading-relaxed">
-              💡 <strong>Instant Quick Fix:</strong> Your broker connection could not be established. Connect via our high-fidelity <strong>Sandbox Simulation Mode</strong> instead to test all journal entries, trading ledgers, and live charts instantly!
-            </p>
-            <button
-              type="button"
-              onClick={handleConnectSandbox}
-              disabled={loading}
-              className="px-3 py-1.5 self-start bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-zinc-950 text-[10px] font-black uppercase rounded-lg transition-all duration-150 cursor-pointer shadow-md"
-            >
-              🚀 Connect via Instant Sandbox Simulation
-            </button>
-          </div>
+        <div className="my-3.5 p-3 rounded-xl bg-rose-950/20 border border-rose-900/30 text-rose-400 text-xs font-medium flex items-center gap-2">
+          <ShieldAlert size={14} className="shrink-0" />
+          <span>{error}</span>
         </div>
       )}
 
@@ -502,30 +441,13 @@ export default function MT5ConnectionPanel({
         )}
 
         {/* Action Button */}
-        <div className="space-y-3 pt-2">
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-3.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-950 font-black uppercase text-xs tracking-wider rounded-xl transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer shadow-sm disabled:opacity-50"
-          >
-            {loading ? "Establishing Broker Link..." : "Link MetaTrader 5 Account"}
-          </button>
-
-          <div className="flex items-center my-1">
-            <div className="flex-1 border-b border-zinc-850"></div>
-            <span className="px-3.5 text-[9px] uppercase font-black text-zinc-600 tracking-wider">Or</span>
-            <div className="flex-1 border-b border-zinc-850"></div>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleConnectSandbox}
-            disabled={loading}
-            className="w-full py-3 bg-zinc-950 border border-emerald-500/20 hover:border-emerald-500/50 hover:bg-emerald-500/5 text-emerald-400 font-extrabold uppercase text-xs tracking-wider rounded-xl transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer shadow-sm"
-          >
-            🚀 Connect via Instant Sandbox Simulation
-          </button>
-        </div>
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full py-3.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-950 font-black uppercase text-xs tracking-wider rounded-xl transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer shadow-sm disabled:opacity-50"
+        >
+          {loading ? "Establishing Broker Link..." : "Link MetaTrader 5 Account"}
+        </button>
       </form>
     </div>
   );

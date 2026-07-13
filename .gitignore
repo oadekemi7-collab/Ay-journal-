@@ -7,10 +7,3 @@ coverage/
 .env*
 !.env.example
 firebase-applet-config.json
-.metaapi/
-*.bin
-*.db
-*.sqlite
-.cache/
-temp/
-tmp/
