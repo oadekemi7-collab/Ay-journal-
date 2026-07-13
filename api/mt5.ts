@@ -4,6 +4,7 @@ import MetaApiPkg from "metaapi.cloud-sdk/node";
 const MetaApi = (MetaApiPkg as any).default || MetaApiPkg;
 const SynchronizationListener = (MetaApiPkg as any).SynchronizationListener;
 import { collection, query, where, getDocs } from "firebase/firestore";
+import { db, saveTradeToFirestore, updateUserProfile } from "../src/lib/firebase.ts";
 
 // Vercel Serverless Runtime Compatibility Patch for Read-only Filesystem
 if (process.env.VERCEL) {
@@ -243,7 +244,7 @@ function reconstructTradesFromDeals(rawDeals: any, accountId: string): any[] {
  */
 async function saveSyncedDataToDatabase(email: string, accountId: string, trades: any[], accountInfo: any) {
   try {
-    const { saveTradeToFirestore, updateUserProfile } = await import("../src/lib/firebase.ts");
+    // Verified via static import at top of file
 
     console.log(`[SYNC ENGINE] Saving ${trades.length} trades to Firestore for user: ${email}`);
     for (const trade of trades) {
@@ -299,7 +300,7 @@ class CustomSyncListener extends SynchronizationListener {
   async onAccountInformationUpdated(instanceIndex: string, accountInformation: any) {
     console.log(`[STREAMING] 📈 Account info updated on MT5 for ${this.accountId}:`, accountInformation);
     try {
-      const { updateUserProfile } = await import("../src/lib/firebase.ts");
+      // Verified via static import at top of file
       await updateUserProfile(this.email, {
         mt5Balance: Number(accountInformation.balance) || 10000,
         mt5Equity: Number(accountInformation.equity) || 10000,
@@ -500,7 +501,7 @@ class MT5BackgroundSyncRegistry {
     const mockInterval = setInterval(async () => {
       try {
         console.log(`[REGISTRY MOCK] Simulating new MT5 trade detection for ${email}`);
-        const { saveTradeToFirestore, updateUserProfile } = await import("../src/lib/firebase.ts");
+        // Verified via static import at top of file
 
         // Simulate random win/loss deal
         const isWin = Math.random() > 0.35;
@@ -603,7 +604,7 @@ if (!process.env.VERCEL) {
  * Helper: Query connected premium users
  */
 async function getConnectedMT5Users() {
-  const { db } = await import("../src/lib/firebase.ts");
+  // Verified via static import at top of file
   const q = query(collection(db, "profiles"), where("mt5Connected", "==", true));
   const snap = await getDocs(q);
   const users: { email: string; mt5AccountId: string }[] = [];

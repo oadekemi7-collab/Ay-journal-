@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { getUserProfile, updateUserProfile } from "../src/lib/firebase.ts";
 
 // Safe dynamic node-fetch import for Paystack API queries
 const fetch = (...args: any[]) => import("node-fetch").then(({ default: fetch }) => (fetch as any)(...args));
@@ -128,8 +129,7 @@ export async function handleVerifyPaystack(req: Request, res: Response) {
       });
     }
 
-    // Dynamic import to fetch Firestore DB operations safely
-    const { getUserProfile, updateUserProfile } = await import("../src/lib/firebase.ts");
+    // Verified via static import at top of file
 
     // Duplicate Payment protection - fetch current user profile to verify reference
     const profile = await getUserProfile(expectedEmail);
