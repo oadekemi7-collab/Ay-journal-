@@ -1,10 +1,4 @@
 import express, { Request, Response, NextFunction } from "express";
-import dotenv from "dotenv";
-import sendCodeHandler from "./send-code.ts";
-import { handleGetConfig, handleConnectAccount, handleSyncAccount, handleConnectMT5 } from "./mt5.ts";
-import { handleInitializePaystack, handleVerifyPaystack } from "./paystack.ts";
-
-dotenv.config();
 
 const app = express();
 app.use(express.json());
@@ -25,58 +19,22 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Register routes with strict method validation to return 405 on incorrect methods
-app.all("/api/send-code", (req: Request, res: Response) => {
-  if (req.method !== "POST") {
-    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
-  }
-  return sendCodeHandler(req, res);
-});
-
+// Minimal handler for debugging Vercel Serverless Function deployment
 app.all("/api/connect-mt5", (req: Request, res: Response) => {
-  if (req.method !== "POST") {
-    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
-  }
-  return handleConnectMT5(req, res);
+  return res.status(200).json({
+    success: true,
+    message: "Serverless function is running."
+  });
 });
 
 app.all("/api/mt5/config", (req: Request, res: Response) => {
-  if (req.method !== "GET") {
-    return res.status(405).json({ success: false, error: "Method Not Allowed. Use GET." });
-  }
-  return handleGetConfig(req, res);
+  return res.status(200).json({
+    success: true,
+    message: "Serverless function config is running."
+  });
 });
 
-app.all("/api/mt5/connect", (req: Request, res: Response) => {
-  if (req.method !== "POST") {
-    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
-  }
-  return handleConnectAccount(req, res);
-});
-
-app.all("/api/mt5/sync", (req: Request, res: Response) => {
-  if (req.method !== "POST") {
-    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
-  }
-  return handleSyncAccount(req, res);
-});
-
-// Paystack secure subscription checkout endpoints
-app.all("/api/paystack/initialize", (req: Request, res: Response) => {
-  if (req.method !== "POST") {
-    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
-  }
-  return handleInitializePaystack(req, res);
-});
-
-app.all("/api/paystack/verify", (req: Request, res: Response) => {
-  if (req.method !== "POST") {
-    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
-  }
-  return handleVerifyPaystack(req, res);
-});
-
-// Fallback for unmatched API routes to ensure JSON/405/404 consistency
+// Fallback for unmatched API routes
 app.use("/api/*", (req: Request, res: Response) => {
   res.status(404).json({
     success: false,
