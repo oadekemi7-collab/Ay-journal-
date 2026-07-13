@@ -5,6 +5,13 @@ const MetaApi = (MetaApiPkg as any).default || MetaApiPkg;
 const SynchronizationListener = (MetaApiPkg as any).SynchronizationListener;
 import { collection, query, where, getDocs } from "firebase/firestore";
 
+// Vercel Serverless Runtime Compatibility Patch for Read-only Filesystem
+if (process.env.VERCEL) {
+  const originalCwd = process.cwd;
+  process.cwd = () => "/tmp";
+  console.log(`[VERCEL COMPATIBILITY] Patched process.cwd to return "/tmp" for writeable filesystem access.`);
+}
+
 // Safe dynamic node-fetch import for fallback queries
 const fetch = (...args: any[]) => import("node-fetch").then(({ default: fetch }) => (fetch as any)(...args));
 
@@ -583,10 +590,14 @@ class MT5BackgroundSyncRegistry {
 // Instantiate global sync registry
 export const syncRegistry = new MT5BackgroundSyncRegistry();
 
-// Trigger connection initialization
-setTimeout(() => {
-  syncRegistry.initializeAllConnections();
-}, 5000);
+// Trigger connection initialization only in persistent full-stack server environments, not on ephemeral Vercel Serverless Functions
+if (!process.env.VERCEL) {
+  setTimeout(() => {
+    syncRegistry.initializeAllConnections();
+  }, 5000);
+} else {
+  console.log("[VERCEL COMPATIBILITY] Ephemeral Serverless Environment detected. Skipping persistent background connection initialization on module load.");
+}
 
 /**
  * Helper: Query connected premium users
@@ -764,8 +775,12 @@ export async function handleConnectMT5(req: Request, res: Response) {
 
       if (email) {
         await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
-        // Start background real-time sync
-        await syncRegistry.startSync(accountId, email, token);
+        // Start background real-time sync (only on persistent full-stack servers)
+        if (!process.env.VERCEL) {
+          await syncRegistry.startSync(accountId, email, token);
+        } else {
+          console.log("[VERCEL COMPATIBILITY] Ephemeral Serverless Environment detected. Skipping background streaming subscription setup.");
+        }
       }
 
       // Close RPC connection since we are done retrieving initial data
@@ -916,6 +931,66 @@ export async function handleSyncAccount(req: Request, res: Response) {
       error: diag.isNetworkError
         ? `MetaApi Connection Failure: ${diag.message}`
         : `MT5 Sync Failed: ${err.message || String(err)}.`
+    });
+  }
+}
+
+/**
+ * Vercel Serverless Function entry point
+ * Dispatches requests to the appropriate route handlers on Vercel
+ */
+export default async function handler(req: any, res: any) {
+  // Support standard CORS headers to allow Vercel and local requests with no issues
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS,PATCH,DELETE,POST,PUT");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version"
+  );
+
+  // Handle OPTIONS preflight request
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
+
+  // Ensure Express-like response helper compatibility in Vercel Serverless environment
+  if (typeof res.status !== "function") {
+    res.status = (code: number) => {
+      res.statusCode = code;
+      return res;
+    };
+  }
+  if (typeof res.json !== "function") {
+    res.json = (body: any) => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(body));
+      return res;
+    };
+  }
+
+  const url = req.url || "";
+  const method = req.method || "";
+
+  console.log(`[Vercel Serverless Handler] Received request URL: ${url}, Method: ${method}`);
+
+  try {
+    if (url.includes("/config")) {
+      return await handleGetConfig(req, res);
+    } else if (url.includes("/connect") || url.includes("/connect-mt5")) {
+      return await handleConnectMT5(req, res);
+    } else if (url.includes("/sync")) {
+      return await handleSyncAccount(req, res);
+    } else {
+      console.warn(`[Vercel Serverless Handler] Route not matched for URL: ${url}`);
+      return res.status(404).json({ success: false, error: `Route not found on MT5 serverless function: ${url}` });
+    }
+  } catch (err: any) {
+    console.error(`[Vercel Serverless Handler] Fatal uncaught error executing ${url}:`, err);
+    return res.status(500).json({
+      success: false,
+      error: `Serverless Function Execution Error: ${err.message || String(err)}`
     });
   }
 }
