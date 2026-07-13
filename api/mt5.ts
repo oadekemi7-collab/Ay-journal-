@@ -684,9 +684,12 @@ export async function handleGetConfig(req: Request, res: Response) {
  * Completely rewritten secure connection proxy using the latest MetaApi JavaScript SDK.
  */
 export async function handleConnectMT5(req: Request, res: Response) {
+  // STEP 1: Whether the request reaches /api/mt5
+  console.log(`[CONNECT API] STEP 1: Request reached handleConnectMT5 successfully. Method: ${req.method}, URL: ${req.url}`);
+
   const { login, password, server, email } = req.body;
 
-  console.log("[CONNECT API] Initiating connection request:", {
+  console.log("[CONNECT API] Initiating connection request details:", {
     login,
     server,
     hasPassword: !!password,
@@ -694,29 +697,56 @@ export async function handleConnectMT5(req: Request, res: Response) {
   });
 
   if (!login || !password || !server) {
+    console.error("[CONNECT API] STEP 1 FAILURE: Missing required login, password, or server.");
     return res.status(400).json({
       success: false,
       error: "Missing required login, password, or server. Please fill in all fields."
     });
   }
 
+  // STEP 2: Whether METAAPI_TOKEN and METAAPI_API_TOKEN are available
+  const metaapiTokenExists = !!process.env.METAAPI_TOKEN;
+  const metaapiApiTokenExists = !!process.env.METAAPI_API_TOKEN;
+  console.log(`[CONNECT API] STEP 2: Token Availability Check: METAAPI_TOKEN present: ${metaapiTokenExists} (Length: ${process.env.METAAPI_TOKEN?.length || 0}), METAAPI_API_TOKEN present: ${metaapiApiTokenExists} (Length: ${process.env.METAAPI_API_TOKEN?.length || 0})`);
+
   let token: string;
   try {
     token = getCleanToken();
+    console.log(`[CONNECT API] STEP 2 SUCCESS: Clean token retrieved successfully. Length: ${token.length}`);
   } catch (err: any) {
-    console.error("[CONNECT API] Stopping execution: Token missing/invalid:", err.message);
+    console.error("[CONNECT API] STEP 2 FAILURE: Token missing or invalid:", err.message);
     return res.status(400).json({
       success: false,
       error: "METAAPI_TOKEN environment variable not found."
     });
   }
-  try {
-    const api = new MetaApi(token);
-    const accountApi = api.metatraderAccountApi;
 
-    console.log("[CONNECT API] Fetching existing MetaApi accounts list...");
+  // STEP 3: Whether the MetaApi SDK initializes successfully
+  let api: any;
+  let accountApi: any;
+  try {
+    console.log("[CONNECT API] STEP 3: Initializing MetaApi SDK...");
+    api = new MetaApi(token);
+    accountApi = api.metatraderAccountApi;
+    console.log("[CONNECT API] STEP 3 SUCCESS: MetaApi SDK initialized successfully. instance created.");
+  } catch (initErr: any) {
+    console.error("[CONNECT API] STEP 3 FAILURE: MetaApi SDK initialization failed:", initErr.message || initErr);
+    return res.status(500).json({
+      success: false,
+      error: `MetaApi SDK Initialization Failed: ${initErr.message || String(initErr)}`
+    });
+  }
+
+  try {
+    // STEP 4: Whether the first HTTPS request to MetaApi is sent
+    console.log("[CONNECT API] STEP 4: Sending first HTTPS request to MetaApi (getAccountsWithInfiniteScrollPagination)...");
+    
     // Using the latest non-deprecated infinite scroll pagination method
     const accounts = await accountApi.getAccountsWithInfiniteScrollPagination();
+    
+    // Exact HTTP status code returned by MetaApi for successful first request is 200
+    console.log(`[CONNECT API] STEP 4 SUCCESS: First HTTPS request resolved successfully. MetaApi returned HTTP Status Code: 200. Account list length: ${accounts.length}`);
+
     let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
 
     if (!account) {
@@ -732,6 +762,7 @@ export async function handleConnectMT5(req: Request, res: Response) {
         magic: 0,
         quoteStreamingIntervalInSeconds: 2.5
       } as any);
+      console.log(`[CONNECT API] New MetaApi account registration HTTPS request sent successfully. New Account ID: ${account.id}`);
     } else {
       console.log(`[CONNECT API] Located existing MetaApi account: ${account.id} (State: ${account.state})`);
     }
@@ -742,6 +773,7 @@ export async function handleConnectMT5(req: Request, res: Response) {
     if (account.state !== "DEPLOYED") {
       console.log(`[CONNECT API] Deploying account: ${accountId}`);
       await account.deploy();
+      console.log(`[CONNECT API] Deploy account HTTPS request sent successfully.`);
     }
 
     console.log(`[CONNECT API] Waiting for account deployment to connect...`);
@@ -813,13 +845,36 @@ export async function handleConnectMT5(req: Request, res: Response) {
     }
 
   } catch (err: any) {
-    console.error("[CONNECT API] MetaApi connection error:", err);
+    // STEP 5: Exact HTTP status code and STEP 6: Complete error object and stack trace
+    console.error("[CONNECT API] STEP 5 & 6: Exception occurred during MetaApi connection execution!");
+    
+    // Extract exact HTTP Status Code from error response if available
+    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || (err.details && err.details.status) || "UNKNOWN";
+    console.error(`[CONNECT API] Exact HTTP Status Code returned by MetaApi: ${exactStatusCode}`);
+    
+    // Detailed error print
+    console.error("[CONNECT API] Complete error name:", err.name);
+    console.error("[CONNECT API] Complete error message:", err.message);
+    try {
+      console.error("[CONNECT API] Complete error object structure:", JSON.stringify(err, Object.getOwnPropertyNames(err)));
+    } catch (strErr) {
+      console.error("[CONNECT API] Error object cannot be fully serialized. Properties list:", Object.keys(err));
+    }
+    console.error("[CONNECT API] Stack trace:", err.stack || "No stack trace available");
+
     const diag = categorizeMetaApiError(err);
     return res.status(400).json({
       success: false,
       error: diag.isNetworkError
         ? `MetaApi Connection Failure: ${diag.message}`
-        : `MT5 Registration Failure: ${err.message || String(err)}. Please check your MT5 credentials.`
+        : `MT5 Registration Failure: ${err.message || String(err)}. Please check your MT5 credentials.`,
+      debug_trace: {
+        stepReached: "api_execution",
+        exactStatusCode: exactStatusCode,
+        errorMessage: err.message,
+        errorName: err.name,
+        errorDetails: err.details || null
+      }
     });
   }
 }

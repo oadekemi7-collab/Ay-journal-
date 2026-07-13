@@ -14,7 +14,9 @@ import {
 } from 'firebase/firestore';
 import { Trade } from '../types';
 
-const metaEnv = (typeof import.meta !== 'undefined' && (import.meta as any).env) ? (import.meta as any).env : {};
+const metaEnv = (typeof import.meta !== 'undefined' && (import.meta as any).env) 
+  ? (import.meta as any).env 
+  : (typeof process !== 'undefined' && process.env ? process.env : {});
 
 const firebaseConfig = {
   apiKey: metaEnv.VITE_FIREBASE_API_KEY || ["AIza", "SyD", "cGbr", "HYi5i", "Z6VjAYY", "_lvdve6", "pc71An9QM"].join(""),
