@@ -1,0 +1,16 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+firebase-applet-config.json
+.metaapi/
+*.bin
+*.db
+*.sqlite
+.cache/
+temp/
+tmp/

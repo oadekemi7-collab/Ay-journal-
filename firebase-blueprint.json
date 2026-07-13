@@ -1,0 +1,32 @@
+{
+  "collections": {
+    "trades": {
+      "schema": {
+        "id": "string",
+        "email": "string",
+        "pair": "string",
+        "type": "string",
+        "risk": "number",
+        "pl": "number",
+        "emotion": "string",
+        "date": "string",
+        "notes": "string",
+        "createdAt": "timestamp"
+      },
+      "indexes": [
+        {
+          "fields": {
+            "email": "asc",
+            "date": "desc"
+          }
+        },
+        {
+          "fields": {
+            "email": "asc",
+            "createdAt": "desc"
+          }
+        }
+      ]
+    }
+  }
+}

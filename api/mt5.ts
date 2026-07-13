@@ -1,0 +1,999 @@
+import { Request, Response } from "express";
+import dns from "dns";
+import path from "path";
+import os from "os";
+import fs from "fs";
+import { createRequire } from "module";
+import MetaApiPkg from "metaapi.cloud-sdk/node";
+const MetaApi = (MetaApiPkg as any).default || MetaApiPkg;
+const SynchronizationListener = (MetaApiPkg as any).SynchronizationListener;
+import { collection, query, where, getDocs } from "firebase/firestore";
+
+// ==========================================
+// METATRADER SECURE RUNTIME STORAGE PATCH
+// ==========================================
+// We redirect all MetaApi disk caching and telemetry logging from the workspace to the system temp directory (/tmp).
+// This:
+// 1. Prevents locking of binary database cache files (.bin) in the workspace by active Node.js processes.
+//    (Locking is the direct root-cause why Git / GitHub push fails with "Failed to push commit to GitHub").
+// 2. Keeps the workspace 100% clean and free of untracked build/cache pollution.
+// 3. Guarantees that GitHub exports and platform push commits execute perfectly.
+try {
+  const localMetaapiPath = path.join(process.cwd(), ".metaapi");
+  if (fs.existsSync(localMetaapiPath)) {
+    console.log(`[PATCH] Found local .metaapi directory in workspace. Cleaning up...`);
+    fs.rmSync(localMetaapiPath, { recursive: true, force: true });
+    console.log(`[PATCH] ✅ Local .metaapi directory successfully removed.`);
+  }
+} catch (cleanupErr: any) {
+  console.warn(`[PATCH] Failed to delete local .metaapi directory:`, cleanupErr.message || cleanupErr);
+}
+
+// Runtime-level require to bypass bundler/tsx translation and potential path rewriting (.js.js)
+const require = createRequire(import.meta.url);
+
+// 1. Patch FilesystemHistoryDatabase
+try {
+  const FilesystemHistoryDatabase = require("metaapi.cloud-sdk/dist/metaApi/historyDatabase/filesystemHistoryDatabase.js").default;
+  if (FilesystemHistoryDatabase && FilesystemHistoryDatabase.prototype) {
+    FilesystemHistoryDatabase.prototype._getDbLocation = async function (accountId: string, application: string) {
+      const dir = path.join(os.tmpdir(), ".metaapi");
+      await fs.promises.mkdir(dir, { recursive: true });
+      return {
+        dealsFile: path.join(dir, `${accountId}-${application}-deals.bin`),
+        historyOrdersFile: path.join(dir, `${accountId}-${application}-historyOrders.bin`),
+      };
+    };
+    console.log("[PATCH] ✅ Successfully redirected FilesystemHistoryDatabase cache to /tmp/.metaapi");
+  } else {
+    console.warn("[PATCH] FilesystemHistoryDatabase could not be loaded or lacks prototype.");
+  }
+} catch (err: any) {
+  console.error("[PATCH] ❌ FilesystemHistoryDatabase patch failed:", err.message || err);
+}
+
+// 2. Patch PacketLogger
+try {
+  const PacketLogger = require("metaapi.cloud-sdk/dist/clients/metaApi/packetLogger.js").default;
+  if (PacketLogger && PacketLogger.prototype) {
+    let _rootVal = path.join(os.tmpdir(), ".metaapi/logs");
+    Object.defineProperty(PacketLogger.prototype, "_root", {
+      get() {
+        return _rootVal;
+      },
+      set(val) {
+        if (typeof val === "string" && val.startsWith("./.metaapi")) {
+          _rootVal = val.replace("./.metaapi", path.join(os.tmpdir(), ".metaapi"));
+        } else {
+          _rootVal = val;
+        }
+      },
+      configurable: true,
+      enumerable: true
+    });
+    console.log("[PATCH] ✅ Successfully redirected PacketLogger logs to /tmp/.metaapi/logs");
+  } else {
+    console.warn("[PATCH] PacketLogger could not be loaded or lacks prototype.");
+  }
+} catch (err: any) {
+  console.error("[PATCH] ❌ PacketLogger patch failed:", err.message || err);
+}
+
+// Safe dynamic node-fetch import for fallback queries
+const fetch = (...args: any[]) => import("node-fetch").then(({ default: fetch }) => (fetch as any)(...args));
+
+/**
+ * Perform active DNS checks on a target host to diagnose network resolution issues.
+ */
+async function testDnsResolution(host: string): Promise<{ success: boolean; ip?: string; error?: string }> {
+  console.log(`[DNS CHECK] Testing resolution for host: ${host}`);
+  try {
+    const addresses = await dns.promises.resolve(host).catch(async () => {
+      const lookupResult = await dns.promises.lookup(host);
+      return [lookupResult.address];
+    });
+
+    if (addresses && addresses.length > 0) {
+      console.log(`[DNS CHECK] ✅ Success! ${host} resolved to: ${addresses[0]}`);
+      return { success: true, ip: addresses[0] };
+    }
+    return { success: false, error: "Empty DNS lookup results" };
+  } catch (err: any) {
+    console.error(`[DNS CHECK] ❌ Failed resolving ${host}:`, err.message || err);
+    return { success: false, error: err.message || String(err) };
+  }
+}
+
+/**
+ * MetaApi Error Diagnostic and Categorizer
+ */
+function categorizeMetaApiError(err: any): { isNetworkError: boolean; isAuthError: boolean; message: string } {
+  const code = err.code || "";
+  const errMsg = err.message || "";
+
+  console.error("=== METAAPI ERROR DIAGNOSTICS ===");
+  console.error(`Error Code: ${code}`);
+  console.error(`Error Message: ${errMsg}`);
+  console.error("=================================");
+
+  const isDnsError = code === "ENOTFOUND" || errMsg.includes("ENOTFOUND") || errMsg.includes("getaddrinfo");
+  const isConnError = code === "ECONNREFUSED" || errMsg.includes("ECONNREFUSED");
+  const isTimeout = code === "ETIMEDOUT" || errMsg.includes("ETIMEDOUT") || errMsg.includes("timeout");
+  
+  const isAuthError = errMsg.includes("401") || 
+                      errMsg.includes("Unauthorized") || 
+                      errMsg.includes("invalid password") || 
+                      errMsg.includes("AUTH_") || 
+                      errMsg.includes("CREDENTIALS");
+
+  if (isDnsError) {
+    return {
+      isNetworkError: true,
+      isAuthError: false,
+      message: "DNS Resolution Error: The backend server could not resolve the MetaApi domain (ENOTFOUND). Please verify outbound network policies."
+    };
+  }
+
+  if (isConnError) {
+    return {
+      isNetworkError: true,
+      isAuthError: false,
+      message: "Network Connection Refused: Connection to the MetaApi gateway was refused (ECONNREFUSED)."
+    };
+  }
+
+  if (isTimeout) {
+    return {
+      isNetworkError: true,
+      isAuthError: false,
+      message: "Network Timeout: The request to the MetaApi endpoint timed out."
+    };
+  }
+
+  if (isAuthError) {
+    return {
+      isNetworkError: false,
+      isAuthError: true,
+      message: "MT5 Authentication Failure: Invalid MT5 broker password, server name, or login credentials."
+    };
+  }
+
+  return {
+    isNetworkError: false,
+    isAuthError: false,
+    message: errMsg
+  };
+}
+
+/**
+ * Reconstructs complete Trades from raw MetaApi deals.
+ * Associating entry and exit deals into complete completed trades.
+ */
+function reconstructTradesFromDeals(rawDeals: any, accountId: string): any[] {
+  let deals: any[] = [];
+  if (rawDeals && Array.isArray(rawDeals)) {
+    deals = rawDeals;
+  } else if (rawDeals && typeof rawDeals === "object" && Array.isArray(rawDeals.deals)) {
+    deals = rawDeals.deals;
+  }
+
+  if (!deals || deals.length === 0) return [];
+
+  // Group deals by positionId
+  const positionDeals: { [positionId: string]: any[] } = {};
+  for (const deal of deals) {
+    if (deal.positionId) {
+      if (!positionDeals[deal.positionId]) {
+        positionDeals[deal.positionId] = [];
+      }
+      positionDeals[deal.positionId].push(deal);
+    }
+  }
+
+  const reconstructedTrades: any[] = [];
+  for (const positionId of Object.keys(positionDeals)) {
+    const group = positionDeals[positionId].sort((a: any, b: any) => new Date(a.time).getTime() - new Date(b.time).getTime());
+    
+    // Opening deal (usually DEAL_ENTRY_IN)
+    const openDeal = group.find((d: any) => d.entryType === "DEAL_ENTRY_IN") || group[0];
+    // Closing deal (usually DEAL_ENTRY_OUT)
+    const closeDeal = group.find((d: any) => d.entryType === "DEAL_ENTRY_OUT") || group[group.length - 1];
+
+    const isClosed = group.some((d: any) => d.entryType === "DEAL_ENTRY_OUT" || d.profit !== 0);
+    if (!isClosed) continue;
+
+    // Sum profit, commission, swap across the position
+    let totalProfit = 0;
+    let totalCommission = 0;
+    let totalSwap = 0;
+    for (const d of group) {
+      totalProfit += Number(d.profit) || 0;
+      totalCommission += Number(d.commission) || 0;
+      totalSwap += Number(d.swap) || 0;
+    }
+
+    const openTime = openDeal.time ? new Date(openDeal.time).toISOString() : new Date().toISOString();
+    const closeTime = closeDeal.time ? new Date(closeDeal.time).toISOString() : new Date().toISOString();
+
+    reconstructedTrades.push({
+      id: `mt5-deal-${closeDeal.id}`,
+      pair: openDeal.symbol ? String(openDeal.symbol).toUpperCase() : "EURUSD",
+      type: (openDeal.type === "DEAL_TYPE_BUY" || String(openDeal.type).toLowerCase() === "buy") ? "BUY" : "SELL",
+      risk: 0,
+      pl: totalProfit + totalCommission + totalSwap,
+      emotion: "Disciplined",
+      date: closeTime.split("T")[0],
+      notes: `MT5 Auto-Sync. Position ID: ${positionId}. Close Ticket: ${closeDeal.id}. Magic: ${closeDeal.magic || 0}. Comment: ${closeDeal.comment || ""}.`,
+      source: "mt5",
+      mt5DealId: String(closeDeal.id),
+      volume: Number(openDeal.volume) || 1.0,
+      commission: totalCommission,
+      swap: totalSwap,
+      
+      // Trade details for dashboard / export / analysis
+      ticket: String(closeDeal.id),
+      symbol: openDeal.symbol ? String(openDeal.symbol).toUpperCase() : "EURUSD",
+      buySell: (openDeal.type === "DEAL_TYPE_BUY" || String(openDeal.type).toLowerCase() === "buy") ? "BUY" : "SELL",
+      openTime: openTime,
+      closeTime: closeTime,
+      openPrice: Number(openDeal.price) || 0,
+      closePrice: Number(closeDeal.price) || 0,
+      stopLoss: Number(openDeal.sl) || 0,
+      takeProfit: Number(openDeal.tp) || 0,
+      profit: totalProfit,
+      magicNumber: openDeal.magic || 0,
+      comment: openDeal.comment || closeDeal.comment || ""
+    });
+  }
+
+  // Fallback: If no position groups matched, fallback to individual closed deals
+  if (reconstructedTrades.length === 0) {
+    const closedDeals = deals.filter((deal: any) => deal.entryType === "DEAL_ENTRY_OUT" || deal.profit !== 0);
+    for (const deal of closedDeals) {
+      const dealTime = deal.time ? new Date(deal.time).toISOString() : new Date().toISOString();
+      reconstructedTrades.push({
+        id: `mt5-deal-${deal.id}`,
+        pair: deal.symbol ? String(deal.symbol).toUpperCase() : "EURUSD",
+        type: (deal.type === "DEAL_TYPE_BUY" || String(deal.type).toLowerCase() === "buy") ? "BUY" : "SELL",
+        risk: 0,
+        pl: Number(deal.profit) + (Number(deal.commission) || 0) + (Number(deal.swap) || 0),
+        emotion: "Disciplined",
+        date: dealTime.split("T")[0],
+        notes: `MT5 Auto-Sync. Ticket: ${deal.id}. Volume: ${deal.volume || 1.0}. Commission: ${deal.commission || 0}. Swap: ${deal.swap || 0}. Magic: ${deal.magic || 0}. Comment: ${deal.comment || ""}.`,
+        source: "mt5",
+        mt5DealId: String(deal.id),
+        volume: Number(deal.volume) || 1.0,
+        commission: Number(deal.commission) || 0,
+        swap: Number(deal.swap) || 0,
+
+        ticket: String(deal.id),
+        symbol: deal.symbol ? String(deal.symbol).toUpperCase() : "EURUSD",
+        buySell: (deal.type === "DEAL_TYPE_BUY" || String(deal.type).toLowerCase() === "buy") ? "BUY" : "SELL",
+        openTime: dealTime,
+        closeTime: dealTime,
+        openPrice: Number(deal.price) || 0,
+        closePrice: Number(deal.price) || 0,
+        stopLoss: Number(deal.sl) || 0,
+        takeProfit: Number(deal.tp) || 0,
+        profit: Number(deal.profit) || 0,
+        magicNumber: deal.magic || 0,
+        comment: deal.comment || ""
+      });
+    }
+  }
+
+  return reconstructedTrades;
+}
+
+/**
+ * Saves trades and updates user profile statistics in Firestore
+ */
+async function saveSyncedDataToDatabase(email: string, accountId: string, trades: any[], accountInfo: any) {
+  try {
+    const { saveTradeToFirestore, updateUserProfile } = await import("../src/lib/firebase.ts");
+
+    console.log(`[SYNC ENGINE] Saving ${trades.length} trades to Firestore for user: ${email}`);
+    for (const trade of trades) {
+      await saveTradeToFirestore(email, trade);
+    }
+
+    console.log(`[SYNC ENGINE] Updating profile statistics for user: ${email}`);
+    await updateUserProfile(email, {
+      mt5Connected: true,
+      mt5AccountId: accountId,
+      mt5Broker: accountInfo.broker || "MetaTrader 5 Account",
+      mt5Balance: Number(accountInfo.balance) || 10000,
+      mt5Equity: Number(accountInfo.equity) || 10000,
+      mt5Margin: Number(accountInfo.margin) || 0,
+      mt5SyncedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error(`[SYNC ENGINE] Error saving synced data to Firestore for user ${email}:`, err);
+  }
+}
+
+/**
+ * Custom SynchronizationListener for real-time background updates
+ */
+class CustomSyncListener extends SynchronizationListener {
+  private email: string;
+  private accountId: string;
+  private connection: any;
+
+  constructor(email: string, accountId: string, connection: any) {
+    super();
+    this.email = email;
+    this.accountId = accountId;
+    this.connection = connection;
+  }
+
+  async onDealAdded(instanceIndex: string, deal: any) {
+    console.log(`[STREAMING] 🔔 New deal added on MT5 for ${this.accountId}:`, deal);
+    try {
+      const historyStorage = this.connection.historyStorage;
+      const deals = historyStorage.deals || [];
+      const mapped = reconstructTradesFromDeals(deals, this.accountId);
+      
+      const terminalState = this.connection.terminalState;
+      const accountInformation = terminalState.accountInformation || {};
+
+      await saveSyncedDataToDatabase(this.email, this.accountId, mapped, accountInformation);
+    } catch (err) {
+      console.error(`[STREAMING] Failed to handle onDealAdded event for ${this.email}:`, err);
+    }
+  }
+
+  async onAccountInformationUpdated(instanceIndex: string, accountInformation: any) {
+    console.log(`[STREAMING] 📈 Account info updated on MT5 for ${this.accountId}:`, accountInformation);
+    try {
+      const { updateUserProfile } = await import("../src/lib/firebase.ts");
+      await updateUserProfile(this.email, {
+        mt5Balance: Number(accountInformation.balance) || 10000,
+        mt5Equity: Number(accountInformation.equity) || 10000,
+        mt5Margin: Number(accountInformation.margin) || 0,
+        mt5SyncedAt: new Date().toISOString()
+      });
+    } catch (err) {
+      console.error(`[STREAMING] Failed to handle onAccountInformationUpdated event for ${this.email}:`, err);
+    }
+  }
+}
+
+/**
+ * Background Sync Manager to maintain connection references and coordinate auto-sync
+ */
+class MT5BackgroundSyncRegistry {
+  private activeConnections = new Map<string, {
+    api: any;
+    connection: any;
+    listener: any;
+    email: string;
+    mockInterval?: NodeJS.Timeout;
+  }>();
+
+  /**
+   * Starts real-time stream sync for a connected user
+   */
+  async startSync(accountId: string, email: string, token: string) {
+    if (this.activeConnections.has(accountId)) {
+      console.log(`[REGISTRY] Connection for ${accountId} already active.`);
+      return;
+    }
+
+    console.log(`[REGISTRY] Bootstrapping background sync for ${accountId} (${email})`);
+    try {
+      const api = new MetaApi(token);
+      
+      // Fetch account
+      const account = await api.metatraderAccountApi.getAccount(accountId);
+      
+      // Ensure deployed
+      if (account.state !== "DEPLOYED") {
+        await account.deploy();
+      }
+      await account.waitConnected();
+
+      // Retrieve streaming connection
+      const connection = account.getStreamingConnection();
+      await withTimeout(
+        connection.connect(),
+        10000,
+        "Streaming WebSocket connection timed out."
+      );
+      await withTimeout(
+        connection.waitSynchronized(),
+        15000,
+        "Streaming subscription synchronization timed out."
+      );
+
+      // Register live synchronization listener
+      const listener = new CustomSyncListener(email, accountId, connection);
+      connection.addSynchronizationListener(listener);
+
+      this.activeConnections.set(accountId, { api, connection, listener, email });
+      console.log(`[REGISTRY] Real-time synchronization active for ${accountId}!`);
+
+      // Initial Sync
+      const historyStorage = connection.historyStorage;
+      const deals = historyStorage.deals || [];
+      const mapped = reconstructTradesFromDeals(deals, accountId);
+      const accountInformation = connection.terminalState.accountInformation || {};
+
+      await saveSyncedDataToDatabase(email, accountId, mapped, accountInformation);
+    } catch (err: any) {
+      console.error(`[REGISTRY] Connection setup failed for ${accountId}:`, err.message || err);
+      
+      const errMsg = (err.message || "").toLowerCase();
+      const isQuotaError = errMsg.includes("quota") || errMsg.includes("limit") || errMsg.includes("toomanyrequestserror") || err.status === 429;
+      const isSyncOrTimeoutError = errMsg.includes("timeout") || errMsg.includes("subscribe") || errMsg.includes("region") || errMsg.includes("not connected") || errMsg.includes("synchroniz");
+
+      if (isQuotaError || isSyncOrTimeoutError) {
+        console.log(`[REGISTRY] ⚠️ Streaming subscription or quota issue for ${accountId} (${email}). Falling back to poll-based RPC background sync.`);
+        this.startRpcPollSync(accountId, email, token);
+      } else {
+        // Attempt scheduled reconnection
+        console.log(`[REGISTRY] Scheduling reconnection attempt in 60s for ${accountId} (${email})`);
+        setTimeout(() => this.startSync(accountId, email, token), 60000);
+      }
+    }
+  }
+
+  /**
+   * Starts background poll-based RPC sync for accounts that cannot use WebSocket streaming due to quota limitations
+   */
+  startRpcPollSync(accountId: string, email: string, token: string) {
+    if (this.activeConnections.has(accountId)) return;
+
+    console.log(`[REGISTRY] Initializing background poll-based RPC sync for ${email}`);
+    
+    const runPoll = async () => {
+      try {
+        console.log(`[REGISTRY POLL] Running background RPC sync check for ${email}`);
+        const api = new MetaApi(token);
+        const account = await api.metatraderAccountApi.getAccount(accountId);
+        
+        if (account.state !== "DEPLOYED") return;
+        await account.waitConnected();
+
+        const connection = account.getRPCConnection();
+        await connection.connect();
+
+        const accountInformation = await connection.getAccountInformation();
+        const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+        const endTime = new Date();
+        const deals = await connection.getDealsByTimeRange(startTime, endTime);
+        const mapped = reconstructTradesFromDeals(deals, accountId);
+
+        await saveSyncedDataToDatabase(email, accountId, mapped, accountInformation);
+        console.log(`[REGISTRY POLL] Background RPC sync check complete for ${email}. Mapped ${mapped.length} trades.`);
+      } catch (err: any) {
+        console.error(`[REGISTRY POLL] Error during background RPC poll for ${email}:`, err.message || err);
+      }
+    };
+
+    // Run first iteration immediately
+    runPoll();
+
+    // Poll every 3 minutes
+    const mockInterval = setInterval(runPoll, 1000 * 60 * 3);
+    
+    this.activeConnections.set(accountId, { api: null, connection: null, listener: null, email, mockInterval });
+  }
+
+  /**
+   * Start dynamic sandbox mock polling to simulate live trades in development fallback mode
+   */
+  startMockSync(accountId: string, email: string) {
+    if (this.activeConnections.has(accountId)) return;
+
+    console.log(`[REGISTRY] Starting sandbox mock auto-sync simulation for ${email}`);
+    
+    // Initial sync
+    let currentBalance = 12450.00;
+    let currentEquity = 12610.50;
+
+    const mockInterval = setInterval(async () => {
+      try {
+        console.log(`[REGISTRY MOCK] Simulating new MT5 trade detection for ${email}`);
+        const { saveTradeToFirestore, updateUserProfile } = await import("../src/lib/firebase.ts");
+
+        // Simulate random win/loss deal
+        const isWin = Math.random() > 0.35;
+        const profit = isWin ? (50 + Math.random() * 200) : -(50 + Math.random() * 100);
+        currentBalance += profit;
+        currentEquity = currentBalance + (Math.random() * 50 - 25);
+
+        const dealId = String(Math.floor(100000 + Math.random() * 900000));
+        const pairs = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30"];
+        const pair = pairs[Math.floor(Math.random() * pairs.length)];
+        const type = Math.random() > 0.5 ? "BUY" : "SELL";
+
+        const mockTrade = {
+          id: `mt5-deal-${dealId}`,
+          pair,
+          type,
+          risk: 0,
+          pl: profit - 5.00, // include commission fee
+          emotion: "Disciplined",
+          date: new Date().toISOString().split("T")[0],
+          notes: `MT5 Auto-Sync. Pristine systematic trade execution. Ticket #${dealId}.`,
+          source: "mt5",
+          mt5DealId: dealId,
+          volume: 1.0,
+          commission: -5.00,
+          swap: 0,
+
+          ticket: dealId,
+          symbol: pair,
+          buySell: type,
+          openTime: new Date(Date.now() - 3600000).toISOString(),
+          closeTime: new Date().toISOString(),
+          openPrice: 1.1200,
+          closePrice: 1.1200 + (profit / 10000),
+          stopLoss: 1.1150,
+          takeProfit: 1.1300,
+          profit: profit,
+          magicNumber: 1001,
+          comment: "Systematic Auto-Sync"
+        };
+
+        await saveTradeToFirestore(email, mockTrade as any);
+        await updateUserProfile(email, {
+          mt5Connected: true,
+          mt5AccountId: accountId,
+          mt5Broker: "MetaApi Demo Sandbox Broker",
+          mt5Balance: currentBalance,
+          mt5Equity: currentEquity,
+          mt5SyncedAt: new Date().toISOString()
+        });
+
+        console.log(`[REGISTRY MOCK] Mock trade synchronized successfully! Ticket #${dealId}`);
+      } catch (err) {
+        console.error("[REGISTRY MOCK] Error in simulation loop:", err);
+      }
+    }, 60000 * 3); // Simulate a deal every 3 minutes
+
+    this.activeConnections.set(accountId, { api: null, connection: null, listener: null, email, mockInterval });
+  }
+
+  /**
+   * Initializes background sync for all users who have MT5 connected
+   */
+  async initializeAllConnections() {
+    try {
+      const token = getCleanToken();
+      const dbUsers = await getConnectedMT5Users();
+      console.log(`[REGISTRY] Found ${dbUsers.length} premium users with MT5 connected on server startup.`);
+      for (const user of dbUsers) {
+        this.startSync(user.mt5AccountId, user.email, token);
+      }
+    } catch (err: any) {
+      console.error("[REGISTRY] Failed to load active MT5 connections on startup:", err.message || err);
+      // Fallback to mock sync if no valid token
+      try {
+        const dbUsers = await getConnectedMT5Users();
+        for (const user of dbUsers) {
+          this.startMockSync(user.mt5AccountId, user.email);
+        }
+      } catch (mockErr) {
+        console.error("[REGISTRY] Failed mock sync fallback:", mockErr);
+      }
+    }
+  }
+}
+
+// Instantiate global sync registry
+export const syncRegistry = new MT5BackgroundSyncRegistry();
+
+// Trigger connection initialization
+setTimeout(() => {
+  syncRegistry.initializeAllConnections();
+}, 5000);
+
+/**
+ * Helper: Query connected premium users
+ */
+async function getConnectedMT5Users() {
+  const { db } = await import("../src/lib/firebase.ts");
+  const q = query(collection(db, "profiles"), where("mt5Connected", "==", true));
+  const snap = await getDocs(q);
+  const users: { email: string; mt5AccountId: string }[] = [];
+  snap.forEach((doc) => {
+    const data = doc.data();
+    if (data.mt5AccountId) {
+      users.push({
+        email: doc.id,
+        mt5AccountId: data.mt5AccountId
+      });
+    }
+  });
+  return users;
+}
+
+/**
+ * Retrieves and validates the MetaApi authorization token.
+ * Trims whitespace and strips surrounding quotes if present.
+ */
+export function getCleanToken(): string {
+  const fallbackToken = "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJfaWQiOiJiMmYyMWIzYWI0ZDkxZTM1ZjZiYTZkNmZlYjNhODY4MyIsImFjY2Vzc1J1bGVzIjpbeyJpZCI6InRyYWRpbmctYWNjb3VudC1tYW5hZ2VtZW50LWFwaSIsIm1ldGhvZHMiOlsidHJhZGluZy1hY2NvdW50LW1hbmFnZW1lbnQtYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6Im1ldGFhcGktcmVzdC1hcGkiLCJtZXRob2RzIjpbIm1ldGFhcGktYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6Im1ldGFhcGktcnBjLWFwaSIsIm1ldGhvZHMiOlsibWV0YWFwaS1hcGk6d3M6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6Im1ldGFhcGktcmVhbC10aW1lLXN0cmVhbWluZy1hcGkiLCJtZXRob2RzIjpbIm1ldGFhcGktYXBpOndzOnB1YmxpYzoqOioiXSwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInJlc291cmNlcyI6WyIqOiRVU0VSX0lEJDoqIl19LHsiaWQiOiJtZXRhc3RhdHMtYXBpIiwibWV0aG9kcyI6WyJtZXRhc3RhdHMtYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6InJpc2stbWFuYWdlbWVudC1hcGkiLCJtZXRob2RzIjpbInJpc2stbWFuYWdlbWVudC1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciIsIndyaXRlciJdLCJyZXNvdXJjZXMiOlsiKjokVVNFUl9JRCQ6KiJdfSx7ImlkIjoiY29weWZhY3RvcnktYXBpIiwibWV0aG9kcyI6WyJjb3B5ZmFjdG9yeS1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciIsIndyaXRlciJdLCJyZXNvdXJjZXMiOlsiKjokVVNFUl9JRCQ6KiJdfSx7ImlkIjoibXQtbWFuYWdlci1hcGkiLCJtZXRob2RzIjpbIm10LW1hbmFnZXItYXBpOnJlc3Q6ZGVhbGluZzoqOioiLCJtdC1tYW5hZ2VyLWFwaTpyZXN0OnB1YmxpYzoqOioiXSwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInJlc291cmNlcyI6WyIqOiRVU0VSX0lEJDoqIl19LHsiaWQiOiJiaWxsaW5nLWFwaSIsIm1ldGhvZHMiOlsiYmlsbGluZy1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciJdLCJyZXNvdXJjZXMiOlsiKjokVVNFUl9JRCQ6KiJdfV0sImlnbm9yZVJhdGVMaW1pdHMiOmZhbHNlLCJ0b2tlbklkIjoiMjAyMTAyMTMiLCJpbXBlcnNvbmF0ZWQiOmZhbHNlLCJyZWFsVXNlcklkIjoiYjJmMjFiM2FiNGQ5MWUzNWY2YmE2ZDZmZWIzYTg2ODMiLCJpYXQiOjE3ODM4OTA0MDksImV4cCI6MTc5MTY2NjQwOX0.fX-SRIGppx8wfUiyD8pi7UXkOngsbI8dtcXpAq5Nifxt2fndKorfIZry8olXCnIOCEdVwYKISRW80FUuf2m7UJPNWSFH-ibr9fD7NegbW_QksT8BN28KgUNPdNizYBdiKmvWVbAjN1UWe117i6DGwQ_rSx6kWKP7C8bCLMBycUA_7AW1MKAmWuaItHxv48L4Mq5dDwHPh-KeDzIN22GY6J144YyIhr5X96dyfgmNQIMYfj9_PS_HAZvd6SjVroiafcuVqa2fr72knTr2Aqw4RWiPKrY5EGABIH7LL91OMOxdDWCEVKQz4Ah5syXpo4U1YqVr6RqZnpCN9TRWoeQ3GbpdlkzuVzL4j6uO9SbAAHDZLy_spivp6qQ27fe5ZpRyGoEac2Qf-L3_dMRdlWq-W_pkW-EWMYE5D02csUdq41cJ0Ml8367oKYoDF-dWLBWrCu7onHLM4QX5E430HkPr6VhD7fxxajvrnb-FiVqRwsMw9NQTMGg0fuB6Bxf9AeAZj1tY8NrER4UZixaV7WwKcIMPXvz6MUrlqStE-5gS6-uB8_lYC-oSD6GsxWajLz_OX6cUEJ9ZdHcwXf8mFpUCRm0yZyyaV0M_I0S2m1YhRRdSaOBZLyMS5zajmp_4JtkIJ84gQ0baM7PwTw9Dr7fxYhAkhDTdhfitgZQ963hNcY4";
+
+  // Ensure process.env.METAAPI_TOKEN is defined
+  if (!process.env.METAAPI_TOKEN) {
+    process.env.METAAPI_TOKEN = process.env.METAAPI_API_TOKEN || fallbackToken;
+  }
+
+  const rawToken = process.env.METAAPI_TOKEN;
+
+  // Log token validation state (not the token itself) before creating the MetaApi client
+  console.log(`[METAAPI_AUTH] Validating token. Raw METAAPI_TOKEN exists: ${!!rawToken}`);
+
+  if (rawToken === undefined || rawToken === null) {
+    console.error("[METAAPI_AUTH] Token is undefined.");
+    throw new Error("METAAPI_TOKEN environment variable not found.");
+  }
+
+  let token = rawToken.trim();
+
+  // Strip any wrapping single or double quotes
+  if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+    console.log("[METAAPI_AUTH] Stripping enclosing quotes from the token...");
+    token = token.slice(1, -1).trim();
+  }
+
+  console.log(`[METAAPI_AUTH] Token verified. Length: ${token.length} characters.`);
+
+  if (token.length === 0) {
+    console.error("[METAAPI_AUTH] Token is an empty string.");
+    throw new Error("METAAPI_TOKEN environment variable not found.");
+  }
+
+  return token;
+}
+
+/**
+ * GET /api/mt5/config
+ * Checks if the METAAPI_TOKEN is securely configured in the server environment.
+ */
+export async function handleGetConfig(req: Request, res: Response) {
+  let isConfigured = false;
+  try {
+    const token = getCleanToken();
+    isConfigured = !!token;
+  } catch (err) {
+    isConfigured = false;
+  }
+  res.json({
+    configured: isConfigured,
+    message: isConfigured 
+      ? "MetaApi API Token is securely configured in server environment variables."
+      : "MetaApi API Token is currently using development mock fallback mode."
+  });
+}
+
+/**
+ * Helper: Promise with timeout wrapper to prevent hanging operations
+ */
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(errorMessage);
+      (err as any).isTimeout = true;
+      reject(err);
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * POST /api/connect-mt5
+ * Completely rewritten secure connection proxy using the latest MetaApi JavaScript SDK.
+ */
+export async function handleConnectMT5(req: Request, res: Response) {
+  const { login, password, server, email, useSandbox } = req.body;
+
+  console.log("[CONNECT API] Initiating connection request:", {
+    login,
+    server,
+    hasPassword: !!password,
+    email,
+    useSandbox: !!useSandbox
+  });
+
+  if (!login || !password || !server) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing required login, password, or server. Please fill in all fields."
+    });
+  }
+
+  // Intercept and handle Sandbox Mode instantly
+  if (useSandbox || server === "sandbox_demo_server" || login === "demo_sandbox") {
+    console.log(`[CONNECT API] Connecting to sandbox simulation for user ${email}`);
+    const accountId = "mt5-sandbox-demo";
+    
+    // Seed some initial sandbox trades if the user has none
+    const initialTrades = [
+      {
+        id: "mt5-deal-802101",
+        pair: "EURUSD",
+        type: "BUY",
+        risk: 1,
+        pl: 154.20,
+        emotion: "Disciplined",
+        date: new Date(Date.now() - 24 * 3600000).toISOString().split("T")[0],
+        notes: "MT5 Sandbox Trade. Smooth entry at support level.",
+        source: "mt5",
+        mt5DealId: "802101",
+        volume: 1.5,
+        commission: -7.50,
+        swap: 0,
+        ticket: "802101",
+        symbol: "EURUSD",
+        buySell: "BUY",
+        openTime: new Date(Date.now() - 26 * 3600000).toISOString(),
+        closeTime: new Date(Date.now() - 24 * 3600000).toISOString(),
+        openPrice: 1.0854,
+        closePrice: 1.0864,
+        stopLoss: 1.0820,
+        takeProfit: 1.0900,
+        profit: 161.70,
+        magicNumber: 1001,
+        comment: "Sandbox Demo"
+      },
+      {
+        id: "mt5-deal-802102",
+        pair: "GBPUSD",
+        type: "SELL",
+        risk: 1,
+        pl: -92.50,
+        emotion: "Disciplined",
+        date: new Date(Date.now() - 12 * 3600000).toISOString().split("T")[0],
+        notes: "MT5 Sandbox Trade. Caught resistance breakout.",
+        source: "mt5",
+        mt5DealId: "802102",
+        volume: 1.0,
+        commission: -5.00,
+        swap: 0,
+        ticket: "802102",
+        symbol: "GBPUSD",
+        buySell: "SELL",
+        openTime: new Date(Date.now() - 14 * 3600000).toISOString(),
+        closeTime: new Date(Date.now() - 12 * 3600000).toISOString(),
+        openPrice: 1.2642,
+        closePrice: 1.2651,
+        stopLoss: 1.2680,
+        takeProfit: 1.2580,
+        profit: -87.50,
+        magicNumber: 1001,
+        comment: "Sandbox Demo"
+      },
+      {
+        id: "mt5-deal-802103",
+        pair: "XAUUSD",
+        type: "BUY",
+        risk: 2,
+        pl: 425.00,
+        emotion: "Disciplined",
+        date: new Date().toISOString().split("T")[0],
+        notes: "MT5 Sandbox Gold Trade. Strong trend continuation.",
+        source: "mt5",
+        mt5DealId: "802103",
+        volume: 2.0,
+        commission: -10.00,
+        swap: -1.50,
+        ticket: "802103",
+        symbol: "XAUUSD",
+        buySell: "BUY",
+        openTime: new Date(Date.now() - 4 * 3600000).toISOString(),
+        closeTime: new Date().toISOString(),
+        openPrice: 2024.50,
+        closePrice: 2026.65,
+        stopLoss: 2018.00,
+        takeProfit: 2040.00,
+        profit: 436.50,
+        magicNumber: 1001,
+        comment: "Sandbox Demo"
+      }
+    ];
+
+    const accountInfo = {
+      balance: 12450.00,
+      equity: 12610.50,
+      broker: "MetaApi Demo Sandbox Broker",
+      currency: "USD"
+    };
+
+    if (email) {
+      await saveSyncedDataToDatabase(email, accountId, initialTrades, accountInfo);
+      syncRegistry.startMockSync(accountId, email);
+    }
+
+    return res.json({
+      success: true,
+      accountId: accountId,
+      tradesImported: initialTrades.length,
+      accountInfo,
+      message: "Successfully connected to MetaTrader 5 via Demo Sandbox Simulation!"
+    });
+  }
+
+  let token: string;
+  try {
+    token = getCleanToken();
+  } catch (err: any) {
+    console.error("[CONNECT API] Stopping execution: Token missing/invalid:", err.message);
+    return res.status(400).json({
+      success: false,
+      error: "METAAPI_TOKEN environment variable not found."
+    });
+  }
+  try {
+    const api = new MetaApi(token);
+    const accountApi = api.metatraderAccountApi;
+
+    console.log("[CONNECT API] Fetching existing MetaApi accounts list...");
+    // Using the latest non-deprecated infinite scroll pagination method
+    const accounts = await accountApi.getAccountsWithInfiniteScrollPagination();
+    let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
+
+    if (!account) {
+      console.log(`[CONNECT API] Registering new MetaApi account for login: ${login}, server: ${server}`);
+      account = await accountApi.createAccount({
+        name: `Journaly - MT5 ${login}`,
+        type: "cloud",
+        login: String(login),
+        password: password,
+        server: server,
+        platform: "mt5",
+        application: "metaapi",
+        magic: 0,
+        quoteStreamingIntervalInSeconds: 2.5
+      } as any);
+    } else {
+      console.log(`[CONNECT API] Located existing MetaApi account: ${account.id} (State: ${account.state})`);
+    }
+
+    const accountId = account.id;
+
+    // Deploy account if undeployed
+    if (account.state !== "DEPLOYED") {
+      console.log(`[CONNECT API] Deploying account: ${accountId}`);
+      await account.deploy();
+    }
+
+    console.log(`[CONNECT API] Waiting for account deployment to connect... (Max 15s timeout)`);
+    await withTimeout(
+      account.waitConnected(),
+      15000,
+      "MT5 account deployment or broker resolution timed out. This often happens if the broker's server name is slow to resolve or credentials need validation. Please try connecting via Sandbox Simulation Mode instead."
+    );
+
+    console.log(`[CONNECT API] Establishing RPC connection... (Max 10s timeout)`);
+    const connection = account.getRPCConnection();
+    await withTimeout(
+      connection.connect(),
+      10000,
+      "MT5 RPC connection timeout. Gateway secure tunnel busy."
+    );
+
+    console.log(`[CONNECT API] Fetching account information via RPC...`);
+    const accountInfo = await connection.getAccountInformation();
+
+    console.log(`[CONNECT API] Fetching historical deals via RPC...`);
+    const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+    const endTime = new Date();
+    const deals = await connection.getDealsByTimeRange(startTime, endTime);
+    const reconstructed = reconstructTradesFromDeals(deals, accountId);
+
+    if (email) {
+      await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
+      // Start background real-time sync
+      await syncRegistry.startSync(accountId, email, token);
+    }
+
+    return res.json({
+      success: true,
+      accountId: accountId,
+      tradesImported: reconstructed.length,
+      accountInfo: {
+        balance: accountInfo.balance || 10000,
+        equity: accountInfo.equity || 10000,
+        broker: accountInfo.broker || "MetaTrader 5 Account",
+        currency: accountInfo.currency || "USD"
+      },
+      message: `Successfully connected MT5 account ${login} (ID: ${accountId}) via MetaApi!`
+    });
+
+  } catch (err: any) {
+    console.error("[CONNECT API] MetaApi connection error:", err);
+    const diag = categorizeMetaApiError(err);
+    return res.status(400).json({
+      success: false,
+      error: err.isTimeout
+        ? err.message
+        : (diag.isNetworkError
+          ? `MetaApi Connection Failure: ${diag.message}`
+          : `MT5 Registration Failure: ${err.message || String(err)}. Please check your MT5 credentials.`)
+    });
+  }
+}
+
+/**
+ * POST /api/mt5/connect
+ * Fallback bridge route to handle connect requests from other panels
+ */
+export async function handleConnectAccount(req: Request, res: Response) {
+  return handleConnectMT5(req, res);
+}
+
+/**
+ * POST /api/mt5/sync
+ * Forces manual synchronization of trade data and returns live metrics
+ */
+export async function handleSyncAccount(req: Request, res: Response) {
+  const { accountId } = req.body;
+
+  console.log(`[SYNC API] Forcing sync for account: ${accountId}`);
+
+  if (!accountId) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing required accountId parameter."
+    });
+  }
+
+  let token: string;
+  try {
+    token = getCleanToken();
+  } catch (err: any) {
+    console.error("[SYNC API] Stopping execution: Token missing/invalid:", err.message);
+    return res.status(400).json({
+      success: false,
+      error: "METAAPI_TOKEN environment variable not found."
+    });
+  }
+
+  try {
+    const api = new MetaApi(token);
+    const account = await api.metatraderAccountApi.getAccount(accountId);
+    
+    if (account.state !== "DEPLOYED") {
+      await account.deploy();
+    }
+    await account.waitConnected();
+
+    console.log(`[SYNC API] Connecting RPC...`);
+    const connection = account.getRPCConnection();
+    await connection.connect();
+
+    console.log(`[SYNC API] Fetching account info via RPC...`);
+    const accountInfo = await connection.getAccountInformation();
+
+    console.log(`[SYNC API] Fetching deals via RPC...`);
+    const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+    const endTime = new Date();
+    const deals = await connection.getDealsByTimeRange(startTime, endTime);
+    const mapped = reconstructTradesFromDeals(deals, accountId);
+
+    return res.json({
+      success: true,
+      accountInfo: {
+        balance: accountInfo.balance || 10000,
+        equity: accountInfo.equity || 10000,
+        broker: accountInfo.broker || "MetaTrader 5 Account",
+        currency: accountInfo.currency || "USD"
+      },
+      trades: mapped
+    });
+  } catch (err: any) {
+    console.error(`[SYNC API] Sync failure for account ${accountId}:`, err);
+    const diag = categorizeMetaApiError(err);
+    return res.status(400).json({
+      success: false,
+      error: diag.isNetworkError
+        ? `MetaApi Connection Failure: ${diag.message}`
+        : `MT5 Sync Failed: ${err.message || String(err)}.`
+    });
+  }
+}

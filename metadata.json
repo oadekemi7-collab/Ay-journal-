@@ -1,0 +1,6 @@
+{
+  "name": "Journaly",
+  "description": "Trading journal dashboard with psychological emotion tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
