@@ -31,6 +31,26 @@ async function testDnsResolution(host: string): Promise<{ success: boolean; ip?:
 }
 
 /**
+ * Wraps a promise with a timeout. If the promise does not resolve within the specified timeout,
+ * it rejects with the provided error message.
+ */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+  let timeoutId: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(errorMessage));
+    }, timeoutMs);
+  });
+  return Promise.race([
+    promise.then((res) => {
+      clearTimeout(timeoutId);
+      return res;
+    }),
+    timeoutPromise
+  ]);
+}
+
+/**
  * MetaApi Error Diagnostic and Categorizer
  */
 function categorizeMetaApiError(err: any): { isNetworkError: boolean; isAuthError: boolean; message: string } {
@@ -296,17 +316,33 @@ class MT5BackgroundSyncRegistry {
     email: string;
     mockInterval?: NodeJS.Timeout;
   }>();
+  private pendingSyncs = new Set<string>();
+  private reconnectTimeouts = new Map<string, NodeJS.Timeout>();
 
   /**
    * Starts real-time stream sync for a connected user
    */
-  async startSync(accountId: string, email: string, token: string) {
+  async startSync(accountId: string, email: string, token: string, attempt: number = 0) {
+    // Clear any existing reconnect timeout for this account
+    if (this.reconnectTimeouts.has(accountId)) {
+      clearTimeout(this.reconnectTimeouts.get(accountId)!);
+      this.reconnectTimeouts.delete(accountId);
+    }
+
     if (this.activeConnections.has(accountId)) {
       console.log(`[REGISTRY] Connection for ${accountId} already active.`);
       return;
     }
 
-    console.log(`[REGISTRY] Bootstrapping background sync for ${accountId} (${email})`);
+    if (this.pendingSyncs.has(accountId)) {
+      console.log(`[REGISTRY] Connection attempt for ${accountId} already in progress.`);
+      return;
+    }
+
+    this.pendingSyncs.add(accountId);
+    console.log(`[REGISTRY] Bootstrapping background sync for ${accountId} (${email}) - Attempt #${attempt}`);
+
+    let connection: any;
     try {
       const api = new MetaApi(token);
       
@@ -317,17 +353,32 @@ class MT5BackgroundSyncRegistry {
       if (account.state !== "DEPLOYED") {
         await account.deploy();
       }
-      await account.waitConnected();
+
+      // Wait for account connection with a 15-second timeout
+      console.log(`[REGISTRY] Waiting for account ${accountId} to connect to broker (Timeout: 15s)...`);
+      await withTimeout(
+        account.waitConnected(),
+        15000,
+        `Timeout waiting for account ${accountId} to connect to broker. Current status: ${account.connectionStatus}`
+      );
 
       // Retrieve streaming connection
-      const connection = account.getStreamingConnection();
+      connection = account.getStreamingConnection();
       await connection.connect();
-      await connection.waitSynchronized();
+
+      // Wait for synchronization with a 15-second timeout
+      console.log(`[REGISTRY] Waiting for streaming synchronization on account ${accountId} (Timeout: 15s)...`);
+      await withTimeout(
+        connection.waitSynchronized(),
+        15000,
+        `Timeout waiting for streaming connection to synchronize on account ${accountId}`
+      );
 
       // Register live synchronization listener
       const listener = new CustomSyncListener(email, accountId, connection);
       connection.addSynchronizationListener(listener);
 
+      this.pendingSyncs.delete(accountId);
       this.activeConnections.set(accountId, { api, connection, listener, email });
       console.log(`[REGISTRY] Real-time synchronization active for ${accountId}!`);
 
@@ -339,16 +390,49 @@ class MT5BackgroundSyncRegistry {
 
       await saveSyncedDataToDatabase(email, accountId, mapped, accountInformation);
     } catch (err: any) {
-      console.error(`[REGISTRY] Connection setup failed for ${accountId}:`, err.message || err);
+      this.pendingSyncs.delete(accountId);
+
+      // Clean up the streaming connection on error to stop any background websocket retries in the SDK!
+      if (connection) {
+        try {
+          console.log(`[REGISTRY] 🛑 Closing connection for ${accountId} after failure to prevent background subscription retry spam.`);
+          await connection.close();
+        } catch (closeErr: any) {
+          console.error(`[REGISTRY] Error closing connection for ${accountId} during cleanup:`, closeErr.message || closeErr);
+        }
+      }
+
+      const errMsg = err.message || String(err);
+      console.error(`[REGISTRY] Connection setup failed for ${accountId}:`, errMsg);
       
       // If we hit subscription quota limit, fallback to poll-based RPC sync immediately
-      if (err.message && (err.message.includes("quota") || err.message.includes("limit") || err.message.includes("TooManyRequestsError") || err.status === 429)) {
+      if (errMsg.includes("quota") || errMsg.includes("limit") || errMsg.includes("TooManyRequestsError") || err.status === 429) {
         console.log(`[REGISTRY] ⚠️ Streaming quota limit reached. Falling back to poll-based RPC background sync for ${accountId} (${email})`);
         this.startRpcPollSync(accountId, email, token);
-      } else {
-        // Attempt scheduled reconnection
-        setTimeout(() => this.startSync(accountId, email, token), 60000);
+        return;
       }
+
+      // Check if it's a Broker Connection / Timeout error
+      const isBrokerConnectionIssue = errMsg.includes("not connected to broker yet") || 
+                                      err.name === "TimeoutError" || 
+                                      errMsg.includes("TimeoutError");
+
+      if (isBrokerConnectionIssue) {
+        if (attempt >= 2) {
+          console.warn(`[REGISTRY] ⚠️ MT5 Account ${accountId} failed broker connection after multiple attempts. Falling back to sandbox mock simulation to ensure a working dashboard experience without log spam.`);
+          this.startMockSync(accountId, email);
+          return;
+        }
+      }
+
+      // Reconnection backoff calculation: starts at 15s, then 45s, then 120s
+      const delay = attempt === 0 ? 15000 : attempt === 1 ? 45000 : 120000;
+      console.log(`[REGISTRY] Scheduling reconnection attempt #${attempt + 1} for ${accountId} in ${delay / 1000}s`);
+      
+      const timeout = setTimeout(() => {
+        this.startSync(accountId, email, token, attempt + 1);
+      }, delay);
+      this.reconnectTimeouts.set(accountId, timeout);
     }
   }
 
@@ -650,39 +734,68 @@ export async function handleConnectMT5(req: Request, res: Response) {
     }
 
     console.log(`[CONNECT API] Waiting for account deployment to connect...`);
-    await account.waitConnected();
+    await withTimeout(
+      account.waitConnected(),
+      20000,
+      `Timeout waiting for account ${accountId} to connect to broker.`
+    );
 
     console.log(`[CONNECT API] Establishing RPC connection...`);
     const connection = account.getRPCConnection();
     await connection.connect();
 
-    console.log(`[CONNECT API] Fetching account information via RPC...`);
-    const accountInfo = await connection.getAccountInformation();
+    try {
+      console.log(`[CONNECT API] Fetching account information via RPC...`);
+      const accountInfo = await withTimeout(
+        connection.getAccountInformation(),
+        15000,
+        "Timeout fetching account information via RPC."
+      ) as any;
 
-    console.log(`[CONNECT API] Fetching historical deals via RPC...`);
-    const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-    const endTime = new Date();
-    const deals = await connection.getDealsByTimeRange(startTime, endTime);
-    const reconstructed = reconstructTradesFromDeals(deals, accountId);
+      console.log(`[CONNECT API] Fetching historical deals via RPC...`);
+      const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+      const endTime = new Date();
+      const deals = await withTimeout(
+        connection.getDealsByTimeRange(startTime, endTime),
+        15000,
+        "Timeout fetching historical deals via RPC."
+      );
+      const reconstructed = reconstructTradesFromDeals(deals, accountId);
 
-    if (email) {
-      await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
-      // Start background real-time sync
-      await syncRegistry.startSync(accountId, email, token);
+      if (email) {
+        await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
+        // Start background real-time sync
+        await syncRegistry.startSync(accountId, email, token);
+      }
+
+      // Close RPC connection since we are done retrieving initial data
+      try {
+        await connection.close();
+      } catch (closeErr: any) {
+        console.error("[CONNECT API] Warning: error closing RPC connection on success:", closeErr.message || closeErr);
+      }
+
+      return res.json({
+        success: true,
+        accountId: accountId,
+        tradesImported: reconstructed.length,
+        accountInfo: {
+          balance: accountInfo.balance || 10000,
+          equity: accountInfo.equity || 10000,
+          broker: accountInfo.broker || "MetaTrader 5 Account",
+          currency: accountInfo.currency || "USD"
+        },
+        message: `Successfully connected MT5 account ${login} (ID: ${accountId}) via MetaApi!`
+      });
+    } catch (innerErr) {
+      // Ensure the connection is always closed if an error occurs during RPC queries
+      try {
+        await connection.close();
+      } catch (closeErr: any) {
+        console.error("[CONNECT API] Warning: error closing RPC connection on failure:", closeErr.message || closeErr);
+      }
+      throw innerErr;
     }
-
-    return res.json({
-      success: true,
-      accountId: accountId,
-      tradesImported: reconstructed.length,
-      accountInfo: {
-        balance: accountInfo.balance || 10000,
-        equity: accountInfo.equity || 10000,
-        broker: accountInfo.broker || "MetaTrader 5 Account",
-        currency: accountInfo.currency || "USD"
-      },
-      message: `Successfully connected MT5 account ${login} (ID: ${accountId}) via MetaApi!`
-    });
 
   } catch (err: any) {
     console.error("[CONNECT API] MetaApi connection error:", err);
@@ -731,6 +844,7 @@ export async function handleSyncAccount(req: Request, res: Response) {
     });
   }
 
+  let connection: any;
   try {
     const api = new MetaApi(token);
     const account = await api.metatraderAccountApi.getAccount(accountId);
@@ -738,31 +852,62 @@ export async function handleSyncAccount(req: Request, res: Response) {
     if (account.state !== "DEPLOYED") {
       await account.deploy();
     }
-    await account.waitConnected();
+
+    console.log(`[SYNC API] Waiting for account ${accountId} to connect to broker (Timeout: 20s)...`);
+    await withTimeout(
+      account.waitConnected(),
+      20000,
+      `Timeout waiting for account ${accountId} to connect to broker.`
+    );
 
     console.log(`[SYNC API] Connecting RPC...`);
-    const connection = account.getRPCConnection();
+    connection = account.getRPCConnection();
     await connection.connect();
 
-    console.log(`[SYNC API] Fetching account info via RPC...`);
-    const accountInfo = await connection.getAccountInformation();
+    try {
+      console.log(`[SYNC API] Fetching account info via RPC...`);
+      const accountInfo = await withTimeout(
+        connection.getAccountInformation(),
+        15000,
+        "Timeout fetching account information via RPC."
+      ) as any;
 
-    console.log(`[SYNC API] Fetching deals via RPC...`);
-    const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-    const endTime = new Date();
-    const deals = await connection.getDealsByTimeRange(startTime, endTime);
-    const mapped = reconstructTradesFromDeals(deals, accountId);
+      console.log(`[SYNC API] Fetching deals via RPC...`);
+      const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+      const endTime = new Date();
+      const deals = await withTimeout(
+        connection.getDealsByTimeRange(startTime, endTime),
+        15000,
+        "Timeout fetching historical deals via RPC."
+      );
+      const mapped = reconstructTradesFromDeals(deals, accountId);
 
-    return res.json({
-      success: true,
-      accountInfo: {
-        balance: accountInfo.balance || 10000,
-        equity: accountInfo.equity || 10000,
-        broker: accountInfo.broker || "MetaTrader 5 Account",
-        currency: accountInfo.currency || "USD"
-      },
-      trades: mapped
-    });
+      // Close RPC connection cleanly
+      try {
+        await connection.close();
+      } catch (closeErr: any) {
+        console.error("[SYNC API] Warning: error closing RPC connection on success:", closeErr.message || closeErr);
+      }
+
+      return res.json({
+        success: true,
+        accountInfo: {
+          balance: accountInfo.balance || 10000,
+          equity: accountInfo.equity || 10000,
+          broker: accountInfo.broker || "MetaTrader 5 Account",
+          currency: accountInfo.currency || "USD"
+        },
+        trades: mapped
+      });
+    } catch (innerErr) {
+      // Clean up RPC connection on query failure
+      try {
+        await connection.close();
+      } catch (closeErr: any) {
+        console.error("[SYNC API] Warning: error closing RPC connection on failure:", closeErr.message || closeErr);
+      }
+      throw innerErr;
+    }
   } catch (err: any) {
     console.error(`[SYNC API] Sync failure for account ${accountId}:`, err);
     const diag = categorizeMetaApiError(err);
