@@ -8,58 +8,61 @@ try {
 
 import express, { Request, Response, NextFunction } from "express";
 
+// Static imports to guarantee Vercel bundles all handlers into a single serverless function
+import sendCodeHandler from "./send-code";
+import { 
+  handleGetConfig, 
+  handleConnectMT5, 
+  handleConnectAccount, 
+  handleSyncAccount,
+  handleStatusAccount
+} from "./mt5";
+import { 
+  handleInitializePaystack, 
+  handleVerifyPaystack 
+} from "./paystack";
+
 const app = express();
 app.use(express.json());
 
-// Helper to wrap handlers dynamically and catch module loading or runtime errors
-function wrapDynamic(importPromise: () => Promise<any>, methodName: string) {
-  return async (req: Request, res: Response, next: NextFunction) => {
+// Helper to handle and format exceptions as JSON
+function handleException(err: any, handlerName: string, res: Response) {
+  console.error(`[CRITICAL HANDLER ERROR] [${handlerName}] Caught exception:`, err);
+  
+  const statusCode = err.status || err.statusCode || 500;
+  
+  // Determine filename and line number if possible from stack trace
+  let fileName = "Unknown file";
+  let lineNumber = "Unknown line";
+  if (err.stack) {
     try {
-      const module = await importPromise();
-      const handler = module[methodName];
-      if (!handler) {
-        throw new Error(`Handler '${methodName}' was not found in the dynamically imported module.`);
-      }
-      return await handler(req, res, next);
-    } catch (err: any) {
-      console.error(`[CRITICAL HANDLER ERROR] [${methodName}] Caught exception:`, err);
-      
-      const statusCode = err.status || err.statusCode || 500;
-      
-      // Determine filename and line number if possible from stack trace
-      let fileName = "Unknown file";
-      let lineNumber = "Unknown line";
-      if (err.stack) {
-        try {
-          const lines = err.stack.split("\n");
-          // Look for any line containing our project path or api files
-          const traceLine = lines.find((l: string) => l.includes("api/") || l.includes("src/"));
-          if (traceLine) {
-            const match = traceLine.match(/at\s+(.+)\s+\((.+):(\d+):(\d+)\)/) || traceLine.match(/at\s+(.+):(\d+):(\d+)/);
-            if (match) {
-              fileName = match[2] || match[1];
-              lineNumber = `${match[3] || match[2]}:${match[4] || match[3]}`;
-            } else {
-              fileName = traceLine.trim();
-            }
-          }
-        } catch (e) {
-          console.error("Failed to parse stack trace:", e);
+      const lines = err.stack.split("\n");
+      // Look for any line containing our project path or api files
+      const traceLine = lines.find((l: string) => l.includes("api/") || l.includes("src/"));
+      if (traceLine) {
+        const match = traceLine.match(/at\s+(.+)\s+\((.+):(\d+):(\d+)\)/) || traceLine.match(/at\s+(.+):(\d+):(\d+)/);
+        if (match) {
+          fileName = match[2] || match[1];
+          lineNumber = `${match[3] || match[2]}:${match[4] || match[3]}`;
+        } else {
+          fileName = traceLine.trim();
         }
       }
-
-      return res.status(statusCode).json({
-        success: false,
-        error: `Vercel Serverless Exception [${methodName}]: ${err.message || String(err)}`,
-        message: err.message || String(err),
-        stack: err.stack,
-        fileName,
-        lineNumber,
-        statusCode,
-        environment: process.env.NODE_ENV || "development"
-      });
+    } catch (e) {
+      console.error("Failed to parse stack trace:", e);
     }
-  };
+  }
+
+  return res.status(statusCode).json({
+    success: false,
+    error: `Vercel Serverless Exception [${handlerName}]: ${err.message || String(err)}`,
+    message: err.message || String(err),
+    stack: err.stack,
+    fileName,
+    lineNumber,
+    statusCode,
+    environment: process.env.NODE_ENV || "development"
+  });
 }
 
 // Enable CORS and OPTIONS handling
@@ -79,67 +82,99 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 // 1. send-code (POST only)
-app.all("/api/send-code", (req: Request, res: Response, next: NextFunction) => {
+app.all("/api/send-code", async (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./send-code"), "default")(req, res, next);
+  try {
+    return await sendCodeHandler(req, res);
+  } catch (err: any) {
+    return handleException(err, "sendCodeHandler", res);
+  }
 });
 
 // 2. connect-mt5 (POST only)
-app.all("/api/connect-mt5", (req: Request, res: Response, next: NextFunction) => {
+app.all("/api/connect-mt5", async (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./mt5"), "handleConnectMT5")(req, res, next);
+  try {
+    return await handleConnectMT5(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleConnectMT5", res);
+  }
 });
 
 // 3. mt5/config (GET only)
-app.all("/api/mt5/config", (req: Request, res: Response, next: NextFunction) => {
+app.all("/api/mt5/config", async (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "GET") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use GET." });
   }
-  return wrapDynamic(() => import("./mt5"), "handleGetConfig")(req, res, next);
+  try {
+    return await handleGetConfig(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleGetConfig", res);
+  }
 });
 
 // 4. mt5/connect (POST only)
-app.all("/api/mt5/connect", (req: Request, res: Response, next: NextFunction) => {
+app.all("/api/mt5/connect", async (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./mt5"), "handleConnectAccount")(req, res, next);
+  try {
+    return await handleConnectAccount(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleConnectAccount", res);
+  }
 });
 
 // 5. mt5/sync (POST only)
-app.all("/api/mt5/sync", (req: Request, res: Response, next: NextFunction) => {
+app.all("/api/mt5/sync", async (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./mt5"), "handleSyncAccount")(req, res, next);
+  try {
+    return await handleSyncAccount(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleSyncAccount", res);
+  }
 });
 
 // 5b. mt5/status (POST only)
-app.all("/api/mt5/status", (req: Request, res: Response, next: NextFunction) => {
+app.all("/api/mt5/status", async (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./mt5"), "handleStatusAccount")(req, res, next);
+  try {
+    return await handleStatusAccount(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleStatusAccount", res);
+  }
 });
 
 // 6. paystack/initialize (POST only)
-app.all("/api/paystack/initialize", (req: Request, res: Response, next: NextFunction) => {
+app.all("/api/paystack/initialize", async (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./paystack"), "handleInitializePaystack")(req, res, next);
+  try {
+    return await handleInitializePaystack(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleInitializePaystack", res);
+  }
 });
 
 // 7. paystack/verify (POST only)
-app.all("/api/paystack/verify", (req: Request, res: Response, next: NextFunction) => {
+app.all("/api/paystack/verify", async (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./paystack"), "handleVerifyPaystack")(req, res, next);
+  try {
+    return await handleVerifyPaystack(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleVerifyPaystack", res);
+  }
 });
 
 // Fallback for unmatched API routes
