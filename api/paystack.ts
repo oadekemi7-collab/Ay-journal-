@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { getUserProfile, updateUserProfile } from "../src/lib/firebase.ts";
+import { getUserProfile, updateUserProfile } from "../src/lib/firebase";
 
 // Safe dynamic node-fetch import for Paystack API queries
 const fetch = (...args: any[]) => import("node-fetch").then(({ default: fetch }) => (fetch as any)(...args));

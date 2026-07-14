@@ -1,4 +1,4 @@
-import "./patch.ts";
+import "./patch";
 import { Request, Response } from "express";
 import dns from "dns";
 import MetaApiPkg from "metaapi.cloud-sdk/node";
@@ -22,7 +22,7 @@ try {
 const SafeSynchronizationListener = SynchronizationListener || class {};
 
 import { collection, query, where, getDocs } from "firebase/firestore";
-import { db, saveTradeToFirestore, updateUserProfile } from "../src/lib/firebase.ts";
+import { db, saveTradeToFirestore, updateUserProfile } from "../src/lib/firebase";
 
 // Safe dynamic node-fetch import for fallback queries
 const fetch = (...args: any[]) => import("node-fetch").then(({ default: fetch }) => (fetch as any)(...args));

@@ -1,4 +1,4 @@
-import "./patch.ts";
+import "./patch";
 import dotenv from "dotenv";
 try {
   dotenv.config();
@@ -83,7 +83,7 @@ app.all("/api/send-code", (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./send-code.ts"), "default")(req, res, next);
+  return wrapDynamic(() => import("./send-code"), "default")(req, res, next);
 });
 
 // 2. connect-mt5 (POST only)
@@ -91,7 +91,7 @@ app.all("/api/connect-mt5", (req: Request, res: Response, next: NextFunction) =>
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./mt5.ts"), "handleConnectMT5")(req, res, next);
+  return wrapDynamic(() => import("./mt5"), "handleConnectMT5")(req, res, next);
 });
 
 // 3. mt5/config (GET only)
@@ -99,7 +99,7 @@ app.all("/api/mt5/config", (req: Request, res: Response, next: NextFunction) => 
   if (req.method !== "GET") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use GET." });
   }
-  return wrapDynamic(() => import("./mt5.ts"), "handleGetConfig")(req, res, next);
+  return wrapDynamic(() => import("./mt5"), "handleGetConfig")(req, res, next);
 });
 
 // 4. mt5/connect (POST only)
@@ -107,7 +107,7 @@ app.all("/api/mt5/connect", (req: Request, res: Response, next: NextFunction) =>
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./mt5.ts"), "handleConnectAccount")(req, res, next);
+  return wrapDynamic(() => import("./mt5"), "handleConnectAccount")(req, res, next);
 });
 
 // 5. mt5/sync (POST only)
@@ -115,7 +115,7 @@ app.all("/api/mt5/sync", (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./mt5.ts"), "handleSyncAccount")(req, res, next);
+  return wrapDynamic(() => import("./mt5"), "handleSyncAccount")(req, res, next);
 });
 
 // 5b. mt5/status (POST only)
@@ -123,7 +123,7 @@ app.all("/api/mt5/status", (req: Request, res: Response, next: NextFunction) => 
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./mt5.ts"), "handleStatusAccount")(req, res, next);
+  return wrapDynamic(() => import("./mt5"), "handleStatusAccount")(req, res, next);
 });
 
 // 6. paystack/initialize (POST only)
@@ -131,7 +131,7 @@ app.all("/api/paystack/initialize", (req: Request, res: Response, next: NextFunc
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./paystack.ts"), "handleInitializePaystack")(req, res, next);
+  return wrapDynamic(() => import("./paystack"), "handleInitializePaystack")(req, res, next);
 });
 
 // 7. paystack/verify (POST only)
@@ -139,7 +139,7 @@ app.all("/api/paystack/verify", (req: Request, res: Response, next: NextFunction
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
-  return wrapDynamic(() => import("./paystack.ts"), "handleVerifyPaystack")(req, res, next);
+  return wrapDynamic(() => import("./paystack"), "handleVerifyPaystack")(req, res, next);
 });
 
 // Fallback for unmatched API routes
