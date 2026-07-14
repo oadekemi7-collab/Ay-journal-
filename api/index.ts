@@ -1,3 +1,7 @@
+import "./patch.ts";
+import dotenv from "dotenv";
+dotenv.config();
+
 import express, { Request, Response, NextFunction } from "express";
 import sendCodeHandler from "./send-code.ts";
 import { 

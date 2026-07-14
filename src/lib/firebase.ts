@@ -18,20 +18,33 @@ const metaEnv = (typeof import.meta !== 'undefined' && (import.meta as any).env)
   ? (import.meta as any).env 
   : (typeof process !== 'undefined' && process.env ? process.env : {});
 
+const getEnvVal = (key: string): string | undefined => {
+  if (metaEnv[key]) return metaEnv[key];
+  if (metaEnv[`VITE_${key}`]) return metaEnv[`VITE_${key}`];
+  if (typeof process !== 'undefined' && process.env) {
+    if (process.env[key]) return process.env[key];
+    if (process.env[`VITE_${key}`]) return process.env[`VITE_${key}`];
+  }
+  return undefined;
+};
+
 const firebaseConfig = {
-  apiKey: metaEnv.VITE_FIREBASE_API_KEY || ["AIza", "SyD", "cGbr", "HYi5i", "Z6VjAYY", "_lvdve6", "pc71An9QM"].join(""),
-  authDomain: metaEnv.VITE_FIREBASE_AUTH_DOMAIN || "ringed-cable-xdpgw.firebaseapp.com",
-  projectId: metaEnv.VITE_FIREBASE_PROJECT_ID || "ringed-cable-xdpgw",
-  storageBucket: metaEnv.VITE_FIREBASE_STORAGE_BUCKET || "ringed-cable-xdpgw.firebasestorage.app",
-  messagingSenderId: metaEnv.VITE_FIREBASE_MESSAGING_SENDER_ID || "574146164237",
-  appId: metaEnv.VITE_FIREBASE_APP_ID || "1:574146164237:web:e35ebfbaf1e31cd0148744"
+  apiKey: getEnvVal("FIREBASE_API_KEY") || ["AIza", "SyD", "cGbr", "HYi5i", "Z6VjAYY", "_lvdve6", "pc71An9QM"].join(""),
+  authDomain: getEnvVal("FIREBASE_AUTH_DOMAIN") || "ringed-cable-xdpgw.firebaseapp.com",
+  projectId: getEnvVal("FIREBASE_PROJECT_ID") || "ringed-cable-xdpgw",
+  storageBucket: getEnvVal("FIREBASE_STORAGE_BUCKET") || "ringed-cable-xdpgw.firebasestorage.app",
+  messagingSenderId: getEnvVal("FIREBASE_MESSAGING_SENDER_ID") || "574146164237",
+  appId: getEnvVal("FIREBASE_APP_ID") || "1:574146164237:web:e35ebfbaf1e31cd0148744"
 };
 
 const app = initializeApp(firebaseConfig);
 
-const customDbId = "ai-studio-b19d81c5-cbb4-43e1-a861-6306ce0a7fd6";
+// If the user deployed on Vercel and configured their own Firebase project,
+// their database will normally be the default database "(default)", so we shouldn't pass the custom database ID.
+const projectId = firebaseConfig.projectId;
+const databaseId = getEnvVal("FIREBASE_DATABASE_ID") || (projectId === "ringed-cable-xdpgw" ? "ai-studio-b19d81c5-cbb4-43e1-a861-6306ce0a7fd6" : undefined);
 
-export const db = getFirestore(app, customDbId);
+export const db = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
 
 export enum OperationType {
   CREATE = 'create',
