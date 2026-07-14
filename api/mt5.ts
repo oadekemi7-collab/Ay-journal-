@@ -16,6 +16,29 @@ if (process.env.VERCEL) {
 // Safe dynamic node-fetch import for fallback queries
 const fetch = (...args: any[]) => import("node-fetch").then(({ default: fetch }) => (fetch as any)(...args));
 
+function serializeError(err: any) {
+  if (!err) return null;
+  return {
+    name: err.name || "Error",
+    message: err.message || String(err),
+    stack: err.stack,
+    status: err.status,
+    statusCode: err.status || err.statusCode || (err.response && err.response.status) || (err.details && err.details.status) || 500,
+    responseBody: err.response?.data || err.details || null,
+    requestUrl: err.response?.config?.url || null,
+    metaapiError: {
+      ...err,
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+      status: err.status,
+      statusCode: err.statusCode || err.status,
+      details: err.details,
+      stringRepresentation: String(err)
+    }
+  };
+}
+
 /**
  * Perform active DNS checks on a target host to diagnose network resolution issues.
  */
@@ -758,9 +781,14 @@ export async function handleConnectMT5(req: Request, res: Response) {
     completeStep("token_retrieval");
   } catch (err: any) {
     failStep("token_retrieval", err);
+    console.error("[CONNECT API] Token retrieval failed:", err);
     return res.status(400).json({
       success: false,
       error: "METAAPI_TOKEN environment variable not found.",
+      message: err.message,
+      stack: err.stack,
+      metaapiError: serializeError(err),
+      statusCode: 400,
       diagnostics
     });
   }
@@ -774,9 +802,14 @@ export async function handleConnectMT5(req: Request, res: Response) {
     completeStep("metaapi_init");
   } catch (initErr: any) {
     failStep("metaapi_init", initErr);
+    console.error("[CONNECT API] MetaApi initialization failed:", initErr);
     return res.status(500).json({
       success: false,
       error: `MetaApi SDK Initialization Failed: ${initErr.message || String(initErr)}`,
+      message: initErr.message,
+      stack: initErr.stack,
+      metaapiError: serializeError(initErr),
+      statusCode: 500,
       diagnostics
     });
   }
@@ -827,19 +860,19 @@ export async function handleConnectMT5(req: Request, res: Response) {
   } catch (err: any) {
     failStep("account_provisioning", err);
 
-    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || (err.details && err.details.status) || "UNKNOWN";
-    diagnostics.error = {
-      name: err.name,
-      message: err.message,
-      stack: err.stack || "No stack trace available",
-      statusCode: exactStatusCode,
-      responseBody: err.response?.data || err.details || null,
-      requestUrl: err.response?.config?.url || null
-    };
+    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || (err.details && err.details.status) || 400;
+    const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+    diagnostics.error = serializeError(err);
 
-    return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+    console.error("[CONNECT API] Complete error object:", err);
+
+    return res.status(finalStatus).json({
       success: false,
       error: `MT5 Provisioning Failure: ${err.message || String(err)}. Please verify your credentials.`,
+      message: err.message || String(err),
+      stack: err.stack,
+      metaapiError: serializeError(err),
+      statusCode: finalStatus,
       diagnostics
     });
   }
@@ -921,9 +954,14 @@ export async function handleStatusAccount(req: Request, res: Response) {
     completeStep("token_retrieval");
   } catch (err: any) {
     failStep("token_retrieval", err);
+    console.error("[STATUS API] Token retrieval failed:", err);
     return res.status(400).json({
       success: false,
       error: "METAAPI_TOKEN environment variable not found.",
+      message: err.message,
+      stack: err.stack,
+      metaapiError: serializeError(err),
+      statusCode: 400,
       diagnostics
     });
   }
@@ -935,9 +973,14 @@ export async function handleStatusAccount(req: Request, res: Response) {
     completeStep("metaapi_init");
   } catch (err: any) {
     failStep("metaapi_init", err);
+    console.error("[STATUS API] MetaApi initialization failed:", err);
     return res.status(500).json({
       success: false,
       error: `MetaApi initialization failed: ${err.message}`,
+      message: err.message,
+      stack: err.stack,
+      metaapiError: serializeError(err),
+      statusCode: 500,
       diagnostics
     });
   }
@@ -950,19 +993,18 @@ export async function handleStatusAccount(req: Request, res: Response) {
   } catch (err: any) {
     failStep("get_account", err);
     
-    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || "UNKNOWN";
-    diagnostics.error = {
-      name: err.name,
-      message: err.message,
-      stack: err.stack,
-      statusCode: exactStatusCode,
-      responseBody: err.response?.data || err.details || null,
-      requestUrl: err.response?.config?.url || null
-    };
+    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || 400;
+    const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+    diagnostics.error = serializeError(err);
+    console.error("[STATUS API] getAccount failed:", err);
 
-    return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+    return res.status(finalStatus).json({
       success: false,
       error: `Failed to fetch MetaApi account details: ${err.message}`,
+      message: err.message,
+      stack: err.stack,
+      metaapiError: serializeError(err),
+      statusCode: finalStatus,
       diagnostics
     });
   }
@@ -974,17 +1016,18 @@ export async function handleStatusAccount(req: Request, res: Response) {
       completeStep("deploy_account");
     } catch (err: any) {
       failStep("deploy_account", err);
-      const exactStatusCode = err.status || err.statusCode || "UNKNOWN";
-      diagnostics.error = {
-        name: err.name,
-        message: err.message,
-        stack: err.stack,
-        statusCode: exactStatusCode,
-        responseBody: err.response?.data || err.details || null
-      };
-      return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+      const exactStatusCode = err.status || err.statusCode || 400;
+      const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+      diagnostics.error = serializeError(err);
+      console.error("[STATUS API] deploy failed:", err);
+
+      return res.status(finalStatus).json({
         success: false,
         error: `Failed to redeploy account: ${err.message}`,
+        message: err.message,
+        stack: err.stack,
+        metaapiError: serializeError(err),
+        statusCode: finalStatus,
         diagnostics
       });
     }
@@ -1020,17 +1063,18 @@ export async function handleStatusAccount(req: Request, res: Response) {
     completeStep("get_rpc_connection");
   } catch (err: any) {
     failStep("get_rpc_connection", err);
-    const exactStatusCode = err.status || err.statusCode || "UNKNOWN";
-    diagnostics.error = {
-      name: err.name,
-      message: err.message,
-      stack: err.stack,
-      statusCode: exactStatusCode,
-      responseBody: err.response?.data || err.details || null
-    };
-    return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+    const exactStatusCode = err.status || err.statusCode || 400;
+    const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+    diagnostics.error = serializeError(err);
+    console.error("[STATUS API] RPC connect failed:", err);
+
+    return res.status(finalStatus).json({
       success: false,
       error: `Failed to establish RPC connection: ${err.message}`,
+      message: err.message,
+      stack: err.stack,
+      metaapiError: serializeError(err),
+      statusCode: finalStatus,
       diagnostics
     });
   }
@@ -1098,19 +1142,18 @@ export async function handleStatusAccount(req: Request, res: Response) {
       console.error("[STATUS API] Warning: error closing RPC connection on failure:", closeErr.message || closeErr);
     }
 
-    const exactStatusCode = err.status || err.statusCode || "UNKNOWN";
-    diagnostics.error = {
-      name: err.name,
-      message: err.message,
-      stack: err.stack,
-      statusCode: exactStatusCode,
-      responseBody: err.response?.data || err.details || null,
-      requestUrl: err.response?.config?.url || null
-    };
+    const exactStatusCode = err.status || err.statusCode || 400;
+    const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+    diagnostics.error = serializeError(err);
+    console.error("[STATUS API] Fetch and sync failed:", err);
 
-    return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+    return res.status(finalStatus).json({
       success: false,
       error: `Failed during data synchronization: ${err.message}`,
+      message: err.message,
+      stack: err.stack,
+      metaapiError: serializeError(err),
+      statusCode: finalStatus,
       diagnostics
     });
   }

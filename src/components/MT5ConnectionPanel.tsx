@@ -108,9 +108,35 @@ export default function MT5ConnectionPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
-      const data = await response.json();
 
-      if (data.success) {
+      const statusCode = response.status;
+      const contentType = response.headers.get("content-type") || "";
+      let responseText = "";
+      let responseJson: any = null;
+      let jsonParsingFailed = false;
+
+      try {
+        responseText = await response.text();
+      } catch (readErr: any) {
+        responseText = `[Failed to read response body: ${readErr.message || String(readErr)}]`;
+      }
+
+      if (contentType.includes("application/json")) {
+        try {
+          responseJson = JSON.parse(responseText);
+        } catch (jsonErr: any) {
+          jsonParsingFailed = true;
+        }
+      } else {
+        try {
+          responseJson = JSON.parse(responseText);
+        } catch (jsonErr) {
+          jsonParsingFailed = true;
+        }
+      }
+
+      if (response.ok && responseJson && responseJson.success) {
+        const data = responseJson;
         if (data.requiresPolling) {
           setSuccessMsg(data.message || "Establishing secure connection to MT5 broker...");
           
@@ -131,11 +157,32 @@ export default function MT5ConnectionPanel({
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ accountId, email })
               });
-              const statusData = await statusRes.json();
+              
+              const statusStatusCode = statusRes.status;
+              let statusText = "";
+              try {
+                statusText = await statusRes.text();
+              } catch (readErr: any) {
+                statusText = `[Failed to read status response body: ${readErr.message || String(readErr)}]`;
+              }
 
-              if (!statusData.success) {
+              let statusData: any = null;
+              let statusJsonFailed = false;
+              try {
+                statusData = JSON.parse(statusText);
+              } catch (e) {
+                statusJsonFailed = true;
+              }
+
+              if (!statusRes.ok || statusJsonFailed || (statusData && !statusData.success)) {
                 setLoading(false);
-                setError(statusData.error || "Failed to establish broker link.");
+                let errorDetails = `HTTP STATUS: ${statusStatusCode}\n`;
+                if (statusJsonFailed) {
+                  errorDetails += `JSON Parsing failed for status response text:\n${statusText}`;
+                } else {
+                  errorDetails += `Response Body:\n${JSON.stringify(statusData, null, 2)}`;
+                }
+                setError(errorDetails);
                 return;
               }
 
@@ -162,7 +209,7 @@ export default function MT5ConnectionPanel({
                 pollCount++;
                 setTimeout(pollStatus, 3000);
               }
-            } catch (pollErr) {
+            } catch (pollErr: any) {
               console.error("Polling error:", pollErr);
               pollCount++;
               setTimeout(pollStatus, 3000);
@@ -191,11 +238,19 @@ export default function MT5ConnectionPanel({
           setLoading(false);
         }
       } else {
-        setError(data.error || "Connection failed. Please check your credentials.");
+        let errorMsg = `HTTP STATUS: ${statusCode}\n`;
+        if (jsonParsingFailed) {
+          errorMsg += `JSON Parsing failed. Response Text:\n${responseText}`;
+        } else if (responseJson) {
+          errorMsg += `Response Body:\n${JSON.stringify(responseJson, null, 2)}`;
+        } else {
+          errorMsg += `Response Text:\n${responseText}`;
+        }
+        setError(errorMsg);
         setLoading(false);
       }
-    } catch (err) {
-      setError("Failed to communicate with MT5 secure gateway. Please verify your connection or check server logs.");
+    } catch (err: any) {
+      setError(`fetch() Exception Occurred:\nMessage: ${err.message || String(err)}\nStack:\n${err.stack || "No stack trace available"}`);
       setLoading(false);
     }
   };
@@ -382,9 +437,14 @@ export default function MT5ConnectionPanel({
       )}
 
       {error && (
-        <div className="my-3.5 p-3 rounded-xl bg-rose-950/20 border border-rose-900/30 text-rose-400 text-xs font-medium flex items-center gap-2">
-          <ShieldAlert size={14} className="shrink-0" />
-          <span>{error}</span>
+        <div className="my-3.5 p-4 rounded-xl bg-rose-950/25 border border-rose-900/40 text-rose-300 text-xs font-medium space-y-2">
+          <div className="flex items-center gap-2 text-rose-400 font-bold uppercase tracking-wider text-[10px]">
+            <ShieldAlert size={16} className="shrink-0 text-rose-500" />
+            <span>MT5 Secure Connection Diagnostic Error:</span>
+          </div>
+          <pre className="font-mono bg-zinc-950/90 p-3 rounded-lg border border-rose-950 text-rose-200 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-72 text-[11px]">
+            {error}
+          </pre>
         </div>
       )}
 
