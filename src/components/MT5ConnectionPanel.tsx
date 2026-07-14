@@ -111,29 +111,91 @@ export default function MT5ConnectionPanel({
       const data = await response.json();
 
       if (data.success) {
-        // Update user profile in Firestore for seamless local sync
-        await updateUserProfile(email, {
-          mt5Connected: true,
-          mt5AccountId: data.accountId,
-          mt5Broker: data.accountInfo?.broker || broker || data.broker || data.name || "MetaTrader Broker Link",
-          mt5Balance: data.accountInfo?.balance || data.balance || 0,
-          mt5Equity: data.accountInfo?.equity || data.equity || 0,
-          mt5SyncedAt: new Date().toISOString()
-        });
+        if (data.requiresPolling) {
+          setSuccessMsg(data.message || "Establishing secure connection to MT5 broker...");
+          
+          let pollCount = 0;
+          const maxPolls = 30; // 30 polls * 3 seconds = 90 seconds max
+          const accountId = data.accountId;
 
-        setSuccessMsg(data.message || "MT5 account linked and synchronized successfully!");
-        setTimeout(() => {
-          onConnected(
-            data.accountId, 
-            data.accountInfo?.broker || broker || data.broker || data.name || "MT5 Connected Account"
-          );
-        }, 1200);
+          const pollStatus = async () => {
+            if (pollCount >= maxPolls) {
+              setLoading(false);
+              setError("Connection verification took too long. Please verify your account manually or retry.");
+              return;
+            }
+
+            try {
+              const statusRes = await fetch("/api/mt5/status", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ accountId, email })
+              });
+              const statusData = await statusRes.json();
+
+              if (!statusData.success) {
+                setLoading(false);
+                setError(statusData.error || "Failed to establish broker link.");
+                return;
+              }
+
+              if (statusData.completed) {
+                await updateUserProfile(email, {
+                  mt5Connected: true,
+                  mt5AccountId: statusData.accountId,
+                  mt5Broker: statusData.accountInfo?.broker || broker || statusData.broker || statusData.name || "MetaTrader Broker Link",
+                  mt5Balance: statusData.accountInfo?.balance || statusData.balance || 0,
+                  mt5Equity: statusData.accountInfo?.equity || statusData.equity || 0,
+                  mt5SyncedAt: new Date().toISOString()
+                });
+
+                setSuccessMsg(statusData.message || "MT5 account linked and synchronized successfully!");
+                setTimeout(() => {
+                  onConnected(
+                    statusData.accountId, 
+                    statusData.accountInfo?.broker || broker || statusData.broker || statusData.name || "MT5 Connected Account"
+                  );
+                }, 1200);
+                setLoading(false);
+              } else {
+                setSuccessMsg(statusData.message || "Linking with MetaTrader broker...");
+                pollCount++;
+                setTimeout(pollStatus, 3000);
+              }
+            } catch (pollErr) {
+              console.error("Polling error:", pollErr);
+              pollCount++;
+              setTimeout(pollStatus, 3000);
+            }
+          };
+
+          setTimeout(pollStatus, 3000);
+        } else {
+          // Direct flow (already complete)
+          await updateUserProfile(email, {
+            mt5Connected: true,
+            mt5AccountId: data.accountId,
+            mt5Broker: data.accountInfo?.broker || broker || data.broker || data.name || "MetaTrader Broker Link",
+            mt5Balance: data.accountInfo?.balance || data.balance || 0,
+            mt5Equity: data.accountInfo?.equity || data.equity || 0,
+            mt5SyncedAt: new Date().toISOString()
+          });
+
+          setSuccessMsg(data.message || "MT5 account linked and synchronized successfully!");
+          setTimeout(() => {
+            onConnected(
+              data.accountId, 
+              data.accountInfo?.broker || broker || data.broker || data.name || "MT5 Connected Account"
+            );
+          }, 1200);
+          setLoading(false);
+        }
       } else {
         setError(data.error || "Connection failed. Please check your credentials.");
+        setLoading(false);
       }
     } catch (err) {
       setError("Failed to communicate with MT5 secure gateway. Please verify your connection or check server logs.");
-    } finally {
       setLoading(false);
     }
   };

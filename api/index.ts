@@ -4,7 +4,8 @@ import {
   handleGetConfig, 
   handleConnectMT5, 
   handleConnectAccount, 
-  handleSyncAccount 
+  handleSyncAccount,
+  handleStatusAccount
 } from "./mt5.ts";
 import { 
   handleInitializePaystack, 
@@ -68,6 +69,14 @@ app.all("/api/mt5/sync", (req: Request, res: Response) => {
     return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
   }
   return handleSyncAccount(req, res);
+});
+
+// 5b. mt5/status (POST only)
+app.all("/api/mt5/status", (req: Request, res: Response) => {
+  if (req.method !== "POST") {
+    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
+  }
+  return handleStatusAccount(req, res);
 });
 
 // 6. paystack/initialize (POST only)

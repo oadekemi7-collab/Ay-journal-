@@ -683,6 +683,59 @@ export async function handleConnectMT5(req: Request, res: Response) {
 
   const { login, password, server, email } = req.body;
 
+  const diagnostics: {
+    startedAt: string;
+    steps: Array<{
+      name: string;
+      description: string;
+      startedAt: string;
+      completedAt?: string;
+      durationMs?: number;
+      status: "started" | "completed" | "failed";
+      details?: any;
+    }>;
+    failedStep: string | null;
+    error: any;
+  } = {
+    startedAt: new Date().toISOString(),
+    steps: [],
+    failedStep: null,
+    error: null
+  };
+
+  function startStep(name: string, description: string) {
+    console.log(`[CONNECT DIAGNOSTICS] [${new Date().toISOString()}] STARTING STEP: ${name} (${description})`);
+    diagnostics.steps.push({
+      name,
+      description,
+      startedAt: new Date().toISOString(),
+      status: "started"
+    });
+  }
+
+  function completeStep(name: string, details?: any) {
+    const step = diagnostics.steps.find(s => s.name === name);
+    if (step) {
+      step.completedAt = new Date().toISOString();
+      step.durationMs = Date.now() - new Date(step.startedAt).getTime();
+      step.status = "completed";
+      step.details = details;
+      console.log(`[CONNECT DIAGNOSTICS] [${step.completedAt}] COMPLETED STEP: ${name} in ${step.durationMs}ms`);
+    }
+  }
+
+  function failStep(name: string, error: any) {
+    const step = diagnostics.steps.find(s => s.name === name);
+    if (step) {
+      step.completedAt = new Date().toISOString();
+      step.durationMs = Date.now() - new Date(step.startedAt).getTime();
+      step.status = "failed";
+      step.details = { error: error.message || String(error) };
+      diagnostics.failedStep = name;
+      console.error(`[CONNECT DIAGNOSTICS] [${step.completedAt}] FAILED STEP: ${name} in ${step.durationMs}ms. Error:`, error);
+    }
+  }
+
   console.log("[CONNECT API] Initiating connection request details:", {
     login,
     server,
@@ -698,53 +751,45 @@ export async function handleConnectMT5(req: Request, res: Response) {
     });
   }
 
-  // STEP 2: Whether METAAPI_TOKEN and METAAPI_API_TOKEN are available
-  const metaapiTokenExists = !!process.env.METAAPI_TOKEN;
-  const metaapiApiTokenExists = !!process.env.METAAPI_API_TOKEN;
-  console.log(`[CONNECT API] STEP 2: Token Availability Check: METAAPI_TOKEN present: ${metaapiTokenExists} (Length: ${process.env.METAAPI_TOKEN?.length || 0}), METAAPI_API_TOKEN present: ${metaapiApiTokenExists} (Length: ${process.env.METAAPI_API_TOKEN?.length || 0})`);
-
   let token: string;
   try {
+    startStep("token_retrieval", "Retrieve clean MetaApi token");
     token = getCleanToken();
-    console.log(`[CONNECT API] STEP 2 SUCCESS: Clean token retrieved successfully. Length: ${token.length}`);
+    completeStep("token_retrieval");
   } catch (err: any) {
-    console.error("[CONNECT API] STEP 2 FAILURE: Token missing or invalid:", err.message);
+    failStep("token_retrieval", err);
     return res.status(400).json({
       success: false,
-      error: "METAAPI_TOKEN environment variable not found."
+      error: "METAAPI_TOKEN environment variable not found.",
+      diagnostics
     });
   }
 
-  // STEP 3: Whether the MetaApi SDK initializes successfully
   let api: any;
   let accountApi: any;
   try {
-    console.log("[CONNECT API] STEP 3: Initializing MetaApi SDK...");
+    startStep("metaapi_init", "Initialize MetaApi SDK instance");
     api = new MetaApi(token);
     accountApi = api.metatraderAccountApi;
-    console.log("[CONNECT API] STEP 3 SUCCESS: MetaApi SDK initialized successfully. instance created.");
+    completeStep("metaapi_init");
   } catch (initErr: any) {
-    console.error("[CONNECT API] STEP 3 FAILURE: MetaApi SDK initialization failed:", initErr.message || initErr);
+    failStep("metaapi_init", initErr);
     return res.status(500).json({
       success: false,
-      error: `MetaApi SDK Initialization Failed: ${initErr.message || String(initErr)}`
+      error: `MetaApi SDK Initialization Failed: ${initErr.message || String(initErr)}`,
+      diagnostics
     });
   }
 
   try {
-    // STEP 4: Whether the first HTTPS request to MetaApi is sent
-    console.log("[CONNECT API] STEP 4: Sending first HTTPS request to MetaApi (getAccountsWithInfiniteScrollPagination)...");
-    
-    // Using the latest non-deprecated infinite scroll pagination method
+    startStep("get_accounts", "Query registered accounts using getAccountsWithInfiniteScrollPagination");
     const accounts = await accountApi.getAccountsWithInfiniteScrollPagination();
-    
-    // Exact HTTP status code returned by MetaApi for successful first request is 200
-    console.log(`[CONNECT API] STEP 4 SUCCESS: First HTTPS request resolved successfully. MetaApi returned HTTP Status Code: 200. Account list length: ${accounts.length}`);
+    completeStep("get_accounts", { accountsCount: accounts.length });
 
     let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
 
     if (!account) {
-      console.log(`[CONNECT API] Registering new MetaApi account for login: ${login}, server: ${server}`);
+      startStep("create_account", "Register new MT5 account on MetaApi using createAccount");
       account = await accountApi.createAccount({
         name: `Journaly - MT5 ${login}`,
         type: "cloud",
@@ -756,119 +801,317 @@ export async function handleConnectMT5(req: Request, res: Response) {
         magic: 0,
         quoteStreamingIntervalInSeconds: 2.5
       } as any);
-      console.log(`[CONNECT API] New MetaApi account registration HTTPS request sent successfully. New Account ID: ${account.id}`);
+      completeStep("create_account", { accountId: account.id });
     } else {
       console.log(`[CONNECT API] Located existing MetaApi account: ${account.id} (State: ${account.state})`);
     }
 
     const accountId = account.id;
 
-    // Deploy account if undeployed
     if (account.state !== "DEPLOYED") {
-      console.log(`[CONNECT API] Deploying account: ${accountId}`);
+      startStep("deploy_account", "Trigger cloud deployment using account.deploy");
       await account.deploy();
-      console.log(`[CONNECT API] Deploy account HTTPS request sent successfully.`);
+      completeStep("deploy_account");
     }
 
-    console.log(`[CONNECT API] Waiting for account deployment to connect...`);
-    await withTimeout(
-      account.waitConnected(),
-      20000,
-      `Timeout waiting for account ${accountId} to connect to broker.`
-    );
-
-    console.log(`[CONNECT API] Establishing RPC connection...`);
-    const connection = account.getRPCConnection();
-    await connection.connect();
-
-    try {
-      console.log(`[CONNECT API] Fetching account information via RPC...`);
-      const accountInfo = await withTimeout(
-        connection.getAccountInformation(),
-        15000,
-        "Timeout fetching account information via RPC."
-      ) as any;
-
-      console.log(`[CONNECT API] Fetching historical deals via RPC...`);
-      const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-      const endTime = new Date();
-      const deals = await withTimeout(
-        connection.getDealsByTimeRange(startTime, endTime),
-        15000,
-        "Timeout fetching historical deals via RPC."
-      );
-      const reconstructed = reconstructTradesFromDeals(deals, accountId);
-
-      if (email) {
-        await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
-        // Start background real-time sync (only on persistent full-stack servers)
-        if (!process.env.VERCEL) {
-          await syncRegistry.startSync(accountId, email, token);
-        } else {
-          console.log("[VERCEL COMPATIBILITY] Ephemeral Serverless Environment detected. Skipping background streaming subscription setup.");
-        }
-      }
-
-      // Close RPC connection since we are done retrieving initial data
-      try {
-        await connection.close();
-      } catch (closeErr: any) {
-        console.error("[CONNECT API] Warning: error closing RPC connection on success:", closeErr.message || closeErr);
-      }
-
-      return res.json({
-        success: true,
-        accountId: accountId,
-        tradesImported: reconstructed.length,
-        accountInfo: {
-          balance: accountInfo.balance || 10000,
-          equity: accountInfo.equity || 10000,
-          broker: accountInfo.broker || "MetaTrader 5 Account",
-          currency: accountInfo.currency || "USD"
-        },
-        message: `Successfully connected MT5 account ${login} (ID: ${accountId}) via MetaApi!`
-      });
-    } catch (innerErr) {
-      // Ensure the connection is always closed if an error occurs during RPC queries
-      try {
-        await connection.close();
-      } catch (closeErr: any) {
-        console.error("[CONNECT API] Warning: error closing RPC connection on failure:", closeErr.message || closeErr);
-      }
-      throw innerErr;
-    }
+    return res.json({
+      success: true,
+      accountId: accountId,
+      state: account.state,
+      connectionStatus: account.connectionStatus,
+      requiresPolling: true,
+      message: "MT5 account deployed on MetaApi secure cloud. Linking broker to dashboard...",
+      diagnostics
+    });
 
   } catch (err: any) {
-    // STEP 5: Exact HTTP status code and STEP 6: Complete error object and stack trace
-    console.error("[CONNECT API] STEP 5 & 6: Exception occurred during MetaApi connection execution!");
-    
-    // Extract exact HTTP Status Code from error response if available
-    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || (err.details && err.details.status) || "UNKNOWN";
-    console.error(`[CONNECT API] Exact HTTP Status Code returned by MetaApi: ${exactStatusCode}`);
-    
-    // Detailed error print
-    console.error("[CONNECT API] Complete error name:", err.name);
-    console.error("[CONNECT API] Complete error message:", err.message);
-    try {
-      console.error("[CONNECT API] Complete error object structure:", JSON.stringify(err, Object.getOwnPropertyNames(err)));
-    } catch (strErr) {
-      console.error("[CONNECT API] Error object cannot be fully serialized. Properties list:", Object.keys(err));
-    }
-    console.error("[CONNECT API] Stack trace:", err.stack || "No stack trace available");
+    failStep("account_provisioning", err);
 
-    const diag = categorizeMetaApiError(err);
+    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || (err.details && err.details.status) || "UNKNOWN";
+    diagnostics.error = {
+      name: err.name,
+      message: err.message,
+      stack: err.stack || "No stack trace available",
+      statusCode: exactStatusCode,
+      responseBody: err.response?.data || err.details || null,
+      requestUrl: err.response?.config?.url || null
+    };
+
+    return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+      success: false,
+      error: `MT5 Provisioning Failure: ${err.message || String(err)}. Please verify your credentials.`,
+      diagnostics
+    });
+  }
+}
+
+/**
+ * POST /api/mt5/status
+ * Polling status and synchronous RPC data extraction endpoint
+ */
+export async function handleStatusAccount(req: Request, res: Response) {
+  const { accountId, email } = req.body;
+
+  const diagnostics: {
+    startedAt: string;
+    steps: Array<{
+      name: string;
+      description: string;
+      startedAt: string;
+      completedAt?: string;
+      durationMs?: number;
+      status: "started" | "completed" | "failed";
+      details?: any;
+    }>;
+    failedStep: string | null;
+    error: any;
+  } = {
+    startedAt: new Date().toISOString(),
+    steps: [],
+    failedStep: null,
+    error: null
+  };
+
+  function startStep(name: string, description: string) {
+    console.log(`[STATUS DIAGNOSTICS] [${new Date().toISOString()}] STARTING STEP: ${name} (${description})`);
+    diagnostics.steps.push({
+      name,
+      description,
+      startedAt: new Date().toISOString(),
+      status: "started"
+    });
+  }
+
+  function completeStep(name: string, details?: any) {
+    const step = diagnostics.steps.find(s => s.name === name);
+    if (step) {
+      step.completedAt = new Date().toISOString();
+      step.durationMs = Date.now() - new Date(step.startedAt).getTime();
+      step.status = "completed";
+      step.details = details;
+      console.log(`[STATUS DIAGNOSTICS] [${step.completedAt}] COMPLETED STEP: ${name} in ${step.durationMs}ms`);
+    }
+  }
+
+  function failStep(name: string, error: any) {
+    const step = diagnostics.steps.find(s => s.name === name);
+    if (step) {
+      step.completedAt = new Date().toISOString();
+      step.durationMs = Date.now() - new Date(step.startedAt).getTime();
+      step.status = "failed";
+      step.details = { error: error.message || String(error) };
+      diagnostics.failedStep = name;
+      console.error(`[STATUS DIAGNOSTICS] [${step.completedAt}] FAILED STEP: ${name} in ${step.durationMs}ms. Error:`, error);
+    }
+  }
+
+  console.log(`[STATUS API] Received status request for account: ${accountId}, email: ${email}`);
+
+  if (!accountId) {
     return res.status(400).json({
       success: false,
-      error: diag.isNetworkError
-        ? `MetaApi Connection Failure: ${diag.message}`
-        : `MT5 Registration Failure: ${err.message || String(err)}. Please check your MT5 credentials.`,
-      debug_trace: {
-        stepReached: "api_execution",
-        exactStatusCode: exactStatusCode,
-        errorMessage: err.message,
-        errorName: err.name,
-        errorDetails: err.details || null
+      error: "Missing required accountId parameter."
+    });
+  }
+
+  let token: string;
+  try {
+    startStep("token_retrieval", "Retrieve clean MetaApi token");
+    token = getCleanToken();
+    completeStep("token_retrieval");
+  } catch (err: any) {
+    failStep("token_retrieval", err);
+    return res.status(400).json({
+      success: false,
+      error: "METAAPI_TOKEN environment variable not found.",
+      diagnostics
+    });
+  }
+
+  let api: any;
+  try {
+    startStep("metaapi_init", "Initialize MetaApi SDK");
+    api = new MetaApi(token);
+    completeStep("metaapi_init");
+  } catch (err: any) {
+    failStep("metaapi_init", err);
+    return res.status(500).json({
+      success: false,
+      error: `MetaApi initialization failed: ${err.message}`,
+      diagnostics
+    });
+  }
+
+  let account: any;
+  try {
+    startStep("get_account", "Fetch MetaApi Metatrader account instance");
+    account = await api.metatraderAccountApi.getAccount(accountId);
+    completeStep("get_account", { state: account.state, connectionStatus: account.connectionStatus });
+  } catch (err: any) {
+    failStep("get_account", err);
+    
+    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || "UNKNOWN";
+    diagnostics.error = {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+      statusCode: exactStatusCode,
+      responseBody: err.response?.data || err.details || null,
+      requestUrl: err.response?.config?.url || null
+    };
+
+    return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+      success: false,
+      error: `Failed to fetch MetaApi account details: ${err.message}`,
+      diagnostics
+    });
+  }
+
+  if (account.state !== "DEPLOYED") {
+    try {
+      startStep("deploy_account", "Deploying undeployed account");
+      await account.deploy();
+      completeStep("deploy_account");
+    } catch (err: any) {
+      failStep("deploy_account", err);
+      const exactStatusCode = err.status || err.statusCode || "UNKNOWN";
+      diagnostics.error = {
+        name: err.name,
+        message: err.message,
+        stack: err.stack,
+        statusCode: exactStatusCode,
+        responseBody: err.response?.data || err.details || null
+      };
+      return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+        success: false,
+        error: `Failed to redeploy account: ${err.message}`,
+        diagnostics
+      });
+    }
+
+    return res.json({
+      success: true,
+      completed: false,
+      accountId,
+      state: account.state,
+      connectionStatus: account.connectionStatus,
+      message: `Account is being deployed. Current state: ${account.state}`,
+      diagnostics
+    });
+  }
+
+  if (account.connectionStatus !== "CONNECTED") {
+    return res.json({
+      success: true,
+      completed: false,
+      accountId,
+      state: account.state,
+      connectionStatus: account.connectionStatus,
+      message: `MetaApi is linking your account to MetaTrader server... Status: ${account.connectionStatus}`,
+      diagnostics
+    });
+  }
+
+  let connection: any;
+  try {
+    startStep("get_rpc_connection", "Acquire RPC connection to broker");
+    connection = account.getRPCConnection();
+    await connection.connect();
+    completeStep("get_rpc_connection");
+  } catch (err: any) {
+    failStep("get_rpc_connection", err);
+    const exactStatusCode = err.status || err.statusCode || "UNKNOWN";
+    diagnostics.error = {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+      statusCode: exactStatusCode,
+      responseBody: err.response?.data || err.details || null
+    };
+    return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+      success: false,
+      error: `Failed to establish RPC connection: ${err.message}`,
+      diagnostics
+    });
+  }
+
+  try {
+    startStep("get_account_information", "Retrieve live account details using getAccountInformation");
+    const accountInfo: any = await withTimeout(
+      connection.getAccountInformation(),
+      15000,
+      "Timeout fetching account information via RPC."
+    );
+    completeStep("get_account_information", { balance: accountInfo.balance, broker: accountInfo.broker });
+
+    startStep("get_deals", "Fetch historical deals from past year using getDealsByTimeRange");
+    const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+    const endTime = new Date();
+    const deals: any = await withTimeout(
+      connection.getDealsByTimeRange(startTime, endTime),
+      15000,
+      "Timeout fetching historical deals via RPC."
+    );
+    completeStep("get_deals", { dealsCount: deals?.length || 0 });
+
+    startStep("save_firestore", "Reconstruct trades and save them to Firestore");
+    const reconstructed = reconstructTradesFromDeals(deals, accountId);
+    
+    if (email) {
+      await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
+      
+      if (!process.env.VERCEL) {
+        await syncRegistry.startSync(accountId, email, token);
       }
+    }
+    completeStep("save_firestore", { tradesImported: reconstructed.length });
+
+    try {
+      await connection.close();
+    } catch (closeErr: any) {
+      console.error("[STATUS API] Warning: error closing RPC connection:", closeErr.message || closeErr);
+    }
+
+    return res.json({
+      success: true,
+      completed: true,
+      accountId,
+      state: account.state,
+      connectionStatus: account.connectionStatus,
+      tradesImported: reconstructed.length,
+      accountInfo: {
+        balance: accountInfo.balance || 10000,
+        equity: accountInfo.equity || 10000,
+        broker: accountInfo.broker || "MetaTrader 5 Account",
+        currency: accountInfo.currency || "USD"
+      },
+      message: `Successfully synchronized and loaded ${reconstructed.length} trades!`,
+      diagnostics
+    });
+
+  } catch (err: any) {
+    failStep("data_fetch_and_sync", err);
+
+    try {
+      await connection.close();
+    } catch (closeErr: any) {
+      console.error("[STATUS API] Warning: error closing RPC connection on failure:", closeErr.message || closeErr);
+    }
+
+    const exactStatusCode = err.status || err.statusCode || "UNKNOWN";
+    diagnostics.error = {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+      statusCode: exactStatusCode,
+      responseBody: err.response?.data || err.details || null,
+      requestUrl: err.response?.config?.url || null
+    };
+
+    return res.status(exactStatusCode === "UNKNOWN" ? 400 : exactStatusCode).json({
+      success: false,
+      error: `Failed during data synchronization: ${err.message}`,
+      diagnostics
     });
   }
 }
@@ -1027,6 +1270,8 @@ export default async function handler(req: any, res: any) {
   try {
     if (url.includes("/config")) {
       return await handleGetConfig(req, res);
+    } else if (url.includes("/status")) {
+      return await handleStatusAccount(req, res);
     } else if (url.includes("/connect") || url.includes("/connect-mt5")) {
       return await handleConnectMT5(req, res);
     } else if (url.includes("/sync")) {
