@@ -37,14 +37,30 @@ const firebaseConfig = {
   appId: getEnvVal("FIREBASE_APP_ID") || "1:574146164237:web:e35ebfbaf1e31cd0148744"
 };
 
-const app = initializeApp(firebaseConfig);
+let app: any;
+let db: any;
 
-// If the user deployed on Vercel and configured their own Firebase project,
-// their database will normally be the default database "(default)", so we shouldn't pass the custom database ID.
-const projectId = firebaseConfig.projectId;
-const databaseId = getEnvVal("FIREBASE_DATABASE_ID") || (projectId === "ringed-cable-xdpgw" ? "ai-studio-b19d81c5-cbb4-43e1-a861-6306ce0a7fd6" : undefined);
+try {
+  app = initializeApp(firebaseConfig);
+  
+  // If the user deployed on Vercel and configured their own Firebase project,
+  // their database will normally be the default database "(default)", so we shouldn't pass the custom database ID.
+  const projectId = firebaseConfig.projectId;
+  const databaseId = getEnvVal("FIREBASE_DATABASE_ID") || (projectId === "ringed-cable-xdpgw" ? "ai-studio-b19d81c5-cbb4-43e1-a861-6306ce0a7fd6" : undefined);
+  
+  db = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+} catch (err: any) {
+  console.error("[FIREBASE INITIALIZATION ERROR] Failed to initialize Firebase app or Firestore:", err);
+  // We export a proxy or a dummy object for db that will throw a descriptive error when accessed
+  db = new Proxy({}, {
+    get(target, prop) {
+      throw new Error(`Firebase failed to initialize correctly during module loading. Real initialization error: ${err.message || String(err)}`);
+    }
+  });
+}
 
-export const db = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+export { db };
+
 
 export enum OperationType {
   CREATE = 'create',

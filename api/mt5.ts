@@ -2,9 +2,25 @@ import "./patch.ts";
 import { Request, Response } from "express";
 import dns from "dns";
 import MetaApiPkg from "metaapi.cloud-sdk/node";
-const MetaApi = (MetaApiPkg as any).default || MetaApiPkg;
-const SynchronizationListener = (MetaApiPkg as any).SynchronizationListener;
-const MetaStats = (MetaApiPkg as any).MetaStats;
+
+let MetaApi: any;
+let SynchronizationListener: any;
+let MetaStats: any;
+
+try {
+  if (MetaApiPkg) {
+    MetaApi = (MetaApiPkg as any).default || MetaApiPkg;
+    SynchronizationListener = (MetaApiPkg as any).SynchronizationListener || 
+                              ((MetaApiPkg as any).default && (MetaApiPkg as any).default.SynchronizationListener);
+    MetaStats = (MetaApiPkg as any).MetaStats || 
+                ((MetaApiPkg as any).default && (MetaApiPkg as any).default.MetaStats);
+  }
+} catch (err) {
+  console.error("[METAAPI INITIALIZATION ERROR] Failed to resolve MetaApi package elements:", err);
+}
+
+const SafeSynchronizationListener = SynchronizationListener || class {};
+
 import { collection, query, where, getDocs } from "firebase/firestore";
 import { db, saveTradeToFirestore, updateUserProfile } from "../src/lib/firebase.ts";
 
@@ -327,7 +343,7 @@ async function saveSyncedDataToDatabase(email: string, accountId: string, trades
 /**
  * Custom SynchronizationListener for real-time background updates
  */
-class CustomSyncListener extends SynchronizationListener {
+class CustomSyncListener extends SafeSynchronizationListener {
   private email: string;
   private accountId: string;
   private connection: any;
