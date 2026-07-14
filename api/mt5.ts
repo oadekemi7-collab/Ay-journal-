@@ -625,38 +625,31 @@ async function getConnectedMT5Users() {
  * Trims whitespace and strips surrounding quotes if present.
  */
 export function getCleanToken(): string {
-  const fallbackToken = "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJfaWQiOiJiMmYyMWIzYWI0ZDkxZTM1ZjZiYTZkNmZlYjNhODY4MyIsImFjY2Vzc1J1bGVzIjpbeyJpZCI6InRyYWRpbmctYWNjb3VudC1tYW5hZ2VtZW50LWFwaSIsIm1ldGhvZHMiOlsidHJhZGluZy1hY2NvdW50LW1hbmFnZW1lbnQtYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6Im1ldGFhcGktcmVzdC1hcGkiLCJtZXRob2RzIjpbIm1ldGFhcGktYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6Im1ldGFhcGktcnBjLWFwaSIsIm1ldGhvZHMiOlsibWV0YWFwaS1hcGk6d3M6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6Im1ldGFhcGktcmVhbC10aW1lLXN0cmVhbWluZy1hcGkiLCJtZXRob2RzIjpbIm1ldGFhcGktYXBpOndzOnB1YmxpYzoqOioiXSwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInJlc291cmNlcyI6WyIqOiRVU0VSX0lEJDoqIl19LHsiaWQiOiJtZXRhc3RhdHMtYXBpIiwibWV0aG9kcyI6WyJtZXRhc3RhdHMtYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6InJpc2stbWFuYWdlbWVudC1hcGkiLCJtZXRob2RzIjpbInJpc2stbWFuYWdlbWVudC1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciIsIndyaXRlciJdLCJyZXNvdXJjZXMiOlsiKjokVVNFUl9JRCQ6KiJdfSx7ImlkIjoiY29weWZhY3RvcnktYXBpIiwibWV0aG9kcyI6WyJjb3B5ZmFjdG9yeS1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciIsIndyaXRlciJdLCJyZXNvdXJjZXMiOlsiKjokVVNFUl9JRCQ6KiJdfSx7ImlkIjoibXQtbWFuYWdlci1hcGkiLCJtZXRob2RzIjpbIm10LW1hbmFnZXItYXBpOnJlc3Q6ZGVhbGluZzoqOioiLCJtdC1tYW5hZ2VyLWFwaTpyZXN0OnB1YmxpYzoqOioiXSwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInJlc291cmNlcyI6WyIqOiRVU0VSX0lEJDoqIl19LHsiaWQiOiJiaWxsaW5nLWFwaSIsIm1ldGhvZHMiOlsiYmlsbGluZy1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciJdLCJyZXNvdXJjZXMiOlsiKjokVVNFUl9JRCQ6KiJdfV0sImlnbm9yZVJhdGVMaW1pdHMiOmZhbHNlLCJ0b2tlbklkIjoiMjAyMTAyMTMiLCJpbXBlcnNvbmF0ZWQiOmZhbHNlLCJyZWFsVXNlcklkIjoiYjJmMjFiM2FiNGQ5MWUzNWY2YmE2ZDZmZWIzYTg2ODMiLCJpYXQiOjE3ODM4OTA0MDksImV4cCI6MTc5MTY2NjQwOX0.fX-SRIGppx8wfUiyD8pi7UXkOngsbI8dtcXpAq5Nifxt2fndKorfIZry8olXCnIOCEdVwYKISRW80FUuf2m7UJPNWSFH-ibr9fD7NegbW_QksT8BN28KgUNPdNizYBdiKmvWVbAjN1UWe117i6DGwQ_rSx6kWKP7C8bCLMBycUA_7AW1MKAmWuaItHxv48L4Mq5dDwHPh-KeDzIN22GY6J144YyIhr5X96dyfgmNQIMYfj9_PS_HAZvd6SjVroiafcuVqa2fr72knTr2Aqw4RWiPKrY5EGABIH7LL91OMOxdDWCEVKQz4Ah5syXpo4U1YqVr6RqZnpCN9TRWoeQ3GbpdlkzuVzL4j6uO9SbAAHDZLy_spivp6qQ27fe5ZpRyGoEac2Qf-L3_dMRdlWq-W_pkW-EWMYE5D02csUdq41cJ0Ml8367oKYoDF-dWLBWrCu7onHLM4QX5E430HkPr6VhD7fxxajvrnb-FiVqRwsMw9NQTMGg0fuB6Bxf9AeAZj1tY8NrER4UZixaV7WwKcIMPXvz6MUrlqStE-5gS6-uB8_lYC-oSD6GsxWajLz_OX6cUEJ9ZdHcwXf8mFpUCRm0yZyyaV0M_I0S2m1YhRRdSaOBZLyMS5zajmp_4JtkIJ84gQ0baM7PwTw9Dr7fxYhAkhDTdhfitgZQ963hNcY4";
+  // Read either METAAPI_TOKEN or METAAPI_API_TOKEN from Environment Variables
+  let rawToken = process.env.METAAPI_TOKEN || process.env.METAAPI_API_TOKEN;
 
-  // Ensure process.env.METAAPI_TOKEN is defined
-  if (!process.env.METAAPI_TOKEN) {
-    process.env.METAAPI_TOKEN = process.env.METAAPI_API_TOKEN || fallbackToken;
-  }
+  // Log token loading status (safely without exposing its value)
+  console.log(`[METAAPI_AUTH] Checking token environment variables. Token present: ${!!rawToken}`);
 
-  const rawToken = process.env.METAAPI_TOKEN;
-
-  // Log token validation state (not the token itself) before creating the MetaApi client
-  console.log(`[METAAPI_AUTH] Validating token. Raw METAAPI_TOKEN exists: ${!!rawToken}`);
-
-  if (rawToken === undefined || rawToken === null) {
-    console.error("[METAAPI_AUTH] Token is undefined.");
-    throw new Error("METAAPI_TOKEN environment variable not found.");
+  if (!rawToken) {
+    console.error("[METAAPI_AUTH] No METAAPI_TOKEN or METAAPI_API_TOKEN variable is set in the environment.");
+    throw new Error("METAAPI_TOKEN or METAAPI_API_TOKEN environment variable not found. Please set it in Vercel or AI Studio environment configuration.");
   }
 
   let token = rawToken.trim();
 
-  // Strip any wrapping single or double quotes
+  // Strip enclosing quotes if present (often happens when pasting into .env or settings UI)
   if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
-    console.log("[METAAPI_AUTH] Stripping enclosing quotes from the token...");
+    console.log("[METAAPI_AUTH] Stripping surrounding quotes from the environment token...");
     token = token.slice(1, -1).trim();
   }
 
-  console.log(`[METAAPI_AUTH] Token verified. Length: ${token.length} characters.`);
-
-  if (token.length === 0) {
-    console.error("[METAAPI_AUTH] Token is an empty string.");
-    throw new Error("METAAPI_TOKEN environment variable not found.");
+  if (token === "undefined" || token === "null" || token.length === 0) {
+    console.error("[METAAPI_AUTH] Token is empty or evaluated to a nullish string representation.");
+    throw new Error("METAAPI_TOKEN or METAAPI_API_TOKEN environment variable is empty or invalid.");
   }
 
+  console.log(`[METAAPI_AUTH] Token verified. Length: ${token.length} characters.`);
   return token;
 }
 
@@ -676,7 +669,7 @@ export async function handleGetConfig(req: Request, res: Response) {
     configured: isConfigured,
     message: isConfigured 
       ? "MetaApi API Token is securely configured in server environment variables."
-      : "MetaApi API Token is currently using development mock fallback mode."
+      : "MetaApi API Token is not configured. Please add METAAPI_TOKEN or METAAPI_API_TOKEN to environment variables."
   });
 }
 

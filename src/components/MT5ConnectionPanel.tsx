@@ -132,7 +132,7 @@ export default function MT5ConnectionPanel({
         setError(data.error || "Connection failed. Please check your credentials.");
       }
     } catch (err) {
-      setError("Failed to communicate with MT5 secure gateway. Sandbox fallbacks available.");
+      setError("Failed to communicate with MT5 secure gateway. Please verify your connection or check server logs.");
     } finally {
       setLoading(false);
     }
