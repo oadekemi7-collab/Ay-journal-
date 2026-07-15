@@ -175,6 +175,28 @@ export class MetaApiRestClient {
     }
   }
 
+  async deleteAccount(accountId: string): Promise<void> {
+    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}`, {
+      method: "DELETE",
+      headers: await this.getAuthHeaders()
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to delete account ${accountId} (HTTP ${res.status}): ${text}`);
+    }
+  }
+
+  async undeploy(accountId: string): Promise<void> {
+    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}/undeploy`, {
+      method: "POST",
+      headers: await this.getAuthHeaders()
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to undeploy account ${accountId} (HTTP ${res.status}): ${text}`);
+    }
+  }
+
   async enableMetaStatsApi(accountId: string): Promise<void> {
     const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}/enable-metastats-api`, {
       method: "POST",
@@ -282,8 +304,10 @@ function createCustomSyncListener(email: string, accountId: string, connection: 
 import { collection, query, where, getDocs } from "firebase/firestore";
 import { db, saveTradeToFirestore, updateUserProfile } from "../src/lib/firebase";
 
-// Safe dynamic node-fetch import for fallback queries
-const fetch = (...args: any[]) => import("node-fetch").then(({ default: fetch }) => (fetch as any)(...args));
+// Safe dynamic fetch using native globalThis.fetch if available
+const fetch = typeof globalThis !== "undefined" && typeof globalThis.fetch === "function"
+  ? globalThis.fetch
+  : (...args: any[]) => import("node-fetch").then(({ default: f }) => (f as any)(...args));
 
 function serializeError(err: any) {
   if (!err) return null;
@@ -1074,6 +1098,35 @@ export async function handleConnectMT5(req: Request, res: Response) {
 
       let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
 
+      if (account) {
+        console.log(`[CONNECT API] Located existing MetaApi account via REST: ${account.id}. Deleting it first to ensure a clean reconnection with updated credentials...`);
+        startStep("delete_stale_account", "Delete existing MT5 account from MetaApi to allow fresh recreate");
+        try {
+          if (account.state === "DEPLOYED") {
+            try {
+              console.log(`[CONNECT API] Account is currently deployed. Attempting to undeploy first...`);
+              await client.undeploy(account.id);
+            } catch (undepErr: any) {
+              console.warn(`[CONNECT API] Undeploy before delete failed (can proceed directly):`, undepErr.message || undepErr);
+            }
+          }
+          await client.deleteAccount(account.id);
+          console.log(`[CONNECT API] Successfully deleted existing account: ${account.id}`);
+          account = null; // Recreate fresh!
+          completeStep("delete_stale_account");
+        } catch (delErr: any) {
+          failStep("delete_stale_account", delErr);
+          console.warn(`[CONNECT API] Failed to delete existing account ${account.id}. Falling back to inline update...`, delErr.message || delErr);
+          
+          startStep("update_account", "Update existing account credentials via Direct REST API");
+          await client.updateAccount(account.id, {
+            password: password,
+            name: `Journaly - MT5 ${login}`
+          });
+          completeStep("update_account");
+        }
+      }
+
       if (!account) {
         startStep("create_account", "Register new MT5 account on MetaApi using Direct REST API");
         account = await client.createAccount({
@@ -1088,14 +1141,6 @@ export async function handleConnectMT5(req: Request, res: Response) {
           quoteStreamingIntervalInSeconds: 2.5
         });
         completeStep("create_account", { accountId: account.id });
-      } else {
-        console.log(`[CONNECT API] Located existing MetaApi account via REST: ${account.id}. Updating password...`);
-        startStep("update_account", "Update existing account credentials via Direct REST API");
-        await client.updateAccount(account.id, {
-          password: password,
-          name: `Journaly - MT5 ${login}`
-        });
-        completeStep("update_account");
       }
 
       const accountId = account.id;
@@ -1168,6 +1213,35 @@ export async function handleConnectMT5(req: Request, res: Response) {
 
       let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
 
+      if (account) {
+        console.log(`[CONNECT API] Located existing MetaApi account: ${account.id}. Deleting it first to ensure a clean reconnection with updated credentials...`);
+        startStep("delete_stale_account", "Delete existing MT5 account from MetaApi to allow fresh recreate");
+        try {
+          if (account.state === "DEPLOYED") {
+            try {
+              console.log(`[CONNECT API] Account is currently deployed. Attempting to undeploy first...`);
+              await account.undeploy();
+            } catch (undepErr: any) {
+              console.warn(`[CONNECT API] Undeploy before delete failed (can proceed directly):`, undepErr.message || undepErr);
+            }
+          }
+          await account.remove();
+          console.log(`[CONNECT API] Successfully removed existing account: ${account.id}`);
+          account = null; // Recreate fresh!
+          completeStep("delete_stale_account");
+        } catch (delErr: any) {
+          failStep("delete_stale_account", delErr);
+          console.warn(`[CONNECT API] Failed to remove existing account ${account.id}. Falling back to inline update...`, delErr.message || delErr);
+          
+          startStep("update_account", "Update existing account credentials");
+          await account.update({
+            password: password,
+            name: `Journaly - MT5 ${login}`
+          });
+          completeStep("update_account");
+        }
+      }
+
       if (!account) {
         startStep("create_account", "Register new MT5 account on MetaApi using createAccount");
         account = await accountApi.createAccount({
@@ -1182,14 +1256,6 @@ export async function handleConnectMT5(req: Request, res: Response) {
           quoteStreamingIntervalInSeconds: 2.5
         } as any);
         completeStep("create_account", { accountId: account.id });
-      } else {
-        console.log(`[CONNECT API] Located existing MetaApi account: ${account.id}. Updating credentials...`);
-        startStep("update_account", "Update existing account credentials");
-        await account.update({
-          password: password,
-          name: `Journaly - MT5 ${login}`
-        });
-        completeStep("update_account");
       }
 
       const accountId = account.id;

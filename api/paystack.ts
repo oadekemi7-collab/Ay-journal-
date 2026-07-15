@@ -1,8 +1,10 @@
 import { Request, Response } from "express";
 import { getUserProfile, updateUserProfile } from "../src/lib/firebase";
 
-// Safe dynamic node-fetch import for Paystack API queries
-const fetch = (...args: any[]) => import("node-fetch").then(({ default: fetch }) => (fetch as any)(...args));
+// Safe dynamic fetch using native globalThis.fetch if available
+const fetch = typeof globalThis !== "undefined" && typeof globalThis.fetch === "function"
+  ? globalThis.fetch
+  : (...args: any[]) => import("node-fetch").then(({ default: f }) => (f as any)(...args));
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || "sk_live_c10d7635687e25fa913c3770474a62301de08f52";
 
