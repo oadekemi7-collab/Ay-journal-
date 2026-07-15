@@ -36,6 +36,189 @@ async function ensureMetaApiLoaded() {
   }
 }
 
+// ============================================================================
+// METAAPI DIRECT REST CLIENT FOR Ephemeral Serverless/Vercel Environments
+// ============================================================================
+export interface MetaApiAccount {
+  id: string;
+  _id?: string;
+  name: string;
+  type: string;
+  login: string;
+  password?: string;
+  server: string;
+  platform: string;
+  state: "DRAFT" | "DEPLOYING" | "DEPLOYED" | "UNDEPLOYED" | "DELETING";
+  connectionStatus: "DISCONNECTED" | "CONNECTING" | "CONNECTED" | "DISCONNECTING";
+  metastatsApiEnabled: boolean;
+  region: string;
+  accountReplicas?: Array<{
+    _id: string;
+    region: string;
+    state: string;
+  }>;
+}
+
+export class MetaApiRestClient {
+  private token: string;
+  private baseHost: string = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai";
+  private resolvedDomain: string | null = null;
+
+  constructor(token: string) {
+    this.token = token;
+  }
+
+  private async getAuthHeaders() {
+    return {
+      "auth-token": this.token,
+      "Content-Type": "application/json",
+      "Accept": "application/json"
+    };
+  }
+
+  private async getResolvedDomain(): Promise<string> {
+    if (this.resolvedDomain) return this.resolvedDomain;
+    try {
+      console.log("[REST CLIENT] Resolving MetaStats server domain...");
+      const res = await fetch(`${this.baseHost}/users/current/servers/mt-client-api`, {
+        method: "GET",
+        headers: await this.getAuthHeaders()
+      });
+      if (res.ok) {
+        const data = await res.json() as any;
+        if (data && data.domain) {
+          this.resolvedDomain = data.domain;
+          console.log(`[REST CLIENT] Resolved server domain: ${this.resolvedDomain}`);
+          return this.resolvedDomain;
+        }
+      }
+    } catch (err: any) {
+      console.warn("[REST CLIENT] Dynamic domain resolution failed, using fallback:", err.message || err);
+    }
+    this.resolvedDomain = "agiliumtrade.ai";
+    return this.resolvedDomain;
+  }
+
+  async getAccounts(): Promise<MetaApiAccount[]> {
+    const res = await fetch(`${this.baseHost}/users/current/accounts`, {
+      method: "GET",
+      headers: await this.getAuthHeaders()
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to list accounts (HTTP ${res.status}): ${text}`);
+    }
+    const accounts = await res.json() as any[];
+    return accounts.map(a => ({
+      ...a,
+      id: a.id || a._id,
+      metastatsApiEnabled: !!a.metastatsApiEnabled
+    }));
+  }
+
+  async getAccount(accountId: string): Promise<MetaApiAccount> {
+    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}`, {
+      method: "GET",
+      headers: await this.getAuthHeaders()
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to fetch account ${accountId} (HTTP ${res.status}): ${text}`);
+    }
+    const a = await res.json() as any;
+    return {
+      ...a,
+      id: a.id || a._id,
+      metastatsApiEnabled: !!a.metastatsApiEnabled
+    };
+  }
+
+  async createAccount(params: any): Promise<MetaApiAccount> {
+    const res = await fetch(`${this.baseHost}/users/current/accounts`, {
+      method: "POST",
+      headers: await this.getAuthHeaders(),
+      body: JSON.stringify(params)
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to create account (HTTP ${res.status}): ${text}`);
+    }
+    const a = await res.json() as any;
+    return {
+      ...a,
+      id: a.id || a._id,
+      metastatsApiEnabled: !!a.metastatsApiEnabled
+    };
+  }
+
+  async deploy(accountId: string): Promise<void> {
+    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}/deploy`, {
+      method: "POST",
+      headers: await this.getAuthHeaders()
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to deploy account ${accountId} (HTTP ${res.status}): ${text}`);
+    }
+  }
+
+  async enableMetaStatsApi(accountId: string): Promise<void> {
+    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}/enable-metastats-api`, {
+      method: "POST",
+      headers: await this.getAuthHeaders()
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to enable MetaStats API for account ${accountId} (HTTP ${res.status}): ${text}`);
+    }
+  }
+
+  async getMetrics(accountId: string, account?: MetaApiAccount): Promise<any> {
+    const acc = account || await this.getAccount(accountId);
+    let region = acc.region || "vint-hill";
+    if (acc.accountReplicas && acc.accountReplicas.length > 0) {
+      const deployedReplica = acc.accountReplicas.find(r => r.state === "DEPLOYED");
+      if (deployedReplica) {
+        region = deployedReplica.region;
+      }
+    }
+    const domain = await this.getResolvedDomain();
+    const url = `https://metastats-api-v1.${region}.${domain}/users/current/accounts/${accountId}/metrics`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: await this.getAuthHeaders()
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to fetch metrics (HTTP ${res.status}): ${text}`);
+    }
+    return await res.json();
+  }
+
+  async getAccountTrades(accountId: string, startTime: string, endTime: string, account?: MetaApiAccount): Promise<any[]> {
+    const acc = account || await this.getAccount(accountId);
+    let region = acc.region || "vint-hill";
+    if (acc.accountReplicas && acc.accountReplicas.length > 0) {
+      const deployedReplica = acc.accountReplicas.find(r => r.state === "DEPLOYED");
+      if (deployedReplica) {
+        region = deployedReplica.region;
+      }
+    }
+    const domain = await this.getResolvedDomain();
+    const url = `https://metastats-api-v1.${region}.${domain}/users/current/accounts/${accountId}/historical-trades/${encodeURIComponent(startTime)}/${encodeURIComponent(endTime)}`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: await this.getAuthHeaders()
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to fetch historical trades (HTTP ${res.status}): ${text}`);
+    }
+    const data = await res.json() as any;
+    return data.trades || data;
+  }
+}
+
 function createCustomSyncListener(email: string, accountId: string, connection: any) {
   const BaseClass = SynchronizationListener || class {};
   const CustomSyncListener = class extends BaseClass {
@@ -866,89 +1049,162 @@ export async function handleConnectMT5(req: Request, res: Response) {
     });
   }
 
-  let api: any;
-  let accountApi: any;
-  try {
-    startStep("metaapi_init", "Initialize MetaApi SDK instance");
-    await ensureMetaApiLoaded();
-    api = new MetaApi(token);
-    accountApi = api.metatraderAccountApi;
-    completeStep("metaapi_init");
-  } catch (initErr: any) {
-    failStep("metaapi_init", initErr);
-    console.error("[CONNECT API] MetaApi initialization failed:", initErr);
-    return res.status(500).json({
-      success: false,
-      error: `MetaApi SDK Initialization Failed: ${initErr.message || String(initErr)}`,
-      message: initErr.message,
-      stack: initErr.stack,
-      metaapiError: serializeError(initErr),
-      statusCode: 500,
-      diagnostics
-    });
-  }
+  if (process.env.VERCEL) {
+    try {
+      startStep("metaapi_init", "Initialize MetaApi Direct REST Client");
+      const client = new MetaApiRestClient(token);
+      completeStep("metaapi_init");
 
-  try {
-    startStep("get_accounts", "Query registered accounts using getAccountsWithInfiniteScrollPagination");
-    const accounts = await accountApi.getAccountsWithInfiniteScrollPagination();
-    completeStep("get_accounts", { accountsCount: accounts.length });
+      startStep("get_accounts", "Query registered accounts via Direct REST API");
+      const accounts = await client.getAccounts();
+      completeStep("get_accounts", { accountsCount: accounts.length });
 
-    let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
+      let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
 
-    if (!account) {
-      startStep("create_account", "Register new MT5 account on MetaApi using createAccount");
-      account = await accountApi.createAccount({
-        name: `Journaly - MT5 ${login}`,
-        type: "cloud",
-        login: String(login),
-        password: password,
-        server: server,
-        platform: "mt5",
-        application: "metaapi",
-        magic: 0,
-        quoteStreamingIntervalInSeconds: 2.5
-      } as any);
-      completeStep("create_account", { accountId: account.id });
-    } else {
-      console.log(`[CONNECT API] Located existing MetaApi account: ${account.id} (State: ${account.state})`);
+      if (!account) {
+        startStep("create_account", "Register new MT5 account on MetaApi using Direct REST API");
+        account = await client.createAccount({
+          name: `Journaly - MT5 ${login}`,
+          type: "cloud",
+          login: String(login),
+          password: password,
+          server: server,
+          platform: "mt5",
+          application: "metaapi",
+          magic: 0,
+          quoteStreamingIntervalInSeconds: 2.5
+        });
+        completeStep("create_account", { accountId: account.id });
+      } else {
+        console.log(`[CONNECT API] Located existing MetaApi account via REST: ${account.id} (State: ${account.state})`);
+      }
+
+      const accountId = account.id;
+
+      if (account.state !== "DEPLOYED") {
+        startStep("deploy_account", "Trigger cloud deployment using Direct REST API");
+        await client.deploy(accountId);
+        try {
+          const updated = await client.getAccount(accountId);
+          account.state = updated.state;
+          account.connectionStatus = updated.connectionStatus;
+        } catch (refreshErr) {
+          console.warn("[CONNECT API] Failed to refresh state after deployment:", refreshErr);
+        }
+        completeStep("deploy_account");
+      }
+
+      return res.json({
+        success: true,
+        accountId: accountId,
+        state: account.state,
+        connectionStatus: account.connectionStatus,
+        requiresPolling: true,
+        message: "MT5 account deployed on MetaApi secure cloud. Linking broker to dashboard...",
+        diagnostics
+      });
+
+    } catch (err: any) {
+      failStep("account_provisioning", err);
+      const exactStatusCode = err.status || err.statusCode || 400;
+      const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+      diagnostics.error = serializeError(err);
+      console.error("[CONNECT API] Direct REST MT5 Connection failed:", err);
+      return res.status(finalStatus).json({
+        success: false,
+        error: `Direct REST MT5 Provisioning Failure: ${err.message || String(err)}. Please verify your credentials.`,
+        message: err.message || String(err),
+        stack: err.stack,
+        metaapiError: serializeError(err),
+        statusCode: finalStatus,
+        diagnostics
+      });
+    }
+  } else {
+    let api: any;
+    let accountApi: any;
+    try {
+      startStep("metaapi_init", "Initialize MetaApi SDK instance");
+      await ensureMetaApiLoaded();
+      api = new MetaApi(token);
+      accountApi = api.metatraderAccountApi;
+      completeStep("metaapi_init");
+    } catch (initErr: any) {
+      failStep("metaapi_init", initErr);
+      console.error("[CONNECT API] MetaApi initialization failed:", initErr);
+      return res.status(500).json({
+        success: false,
+        error: `MetaApi SDK Initialization Failed: ${initErr.message || String(initErr)}`,
+        message: initErr.message,
+        stack: initErr.stack,
+        metaapiError: serializeError(initErr),
+        statusCode: 500,
+        diagnostics
+      });
     }
 
-    const accountId = account.id;
+    try {
+      startStep("get_accounts", "Query registered accounts using getAccountsWithInfiniteScrollPagination");
+      const accounts = await accountApi.getAccountsWithInfiniteScrollPagination();
+      completeStep("get_accounts", { accountsCount: accounts.length });
 
-    if (account.state !== "DEPLOYED") {
-      startStep("deploy_account", "Trigger cloud deployment using account.deploy");
-      await account.deploy();
-      completeStep("deploy_account");
+      let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
+
+      if (!account) {
+        startStep("create_account", "Register new MT5 account on MetaApi using createAccount");
+        account = await accountApi.createAccount({
+          name: `Journaly - MT5 ${login}`,
+          type: "cloud",
+          login: String(login),
+          password: password,
+          server: server,
+          platform: "mt5",
+          application: "metaapi",
+          magic: 0,
+          quoteStreamingIntervalInSeconds: 2.5
+        } as any);
+        completeStep("create_account", { accountId: account.id });
+      } else {
+        console.log(`[CONNECT API] Located existing MetaApi account: ${account.id} (State: ${account.state})`);
+      }
+
+      const accountId = account.id;
+
+      if (account.state !== "DEPLOYED") {
+        startStep("deploy_account", "Trigger cloud deployment using account.deploy");
+        await account.deploy();
+        completeStep("deploy_account");
+      }
+
+      return res.json({
+        success: true,
+        accountId: accountId,
+        state: account.state,
+        connectionStatus: account.connectionStatus,
+        requiresPolling: true,
+        message: "MT5 account deployed on MetaApi secure cloud. Linking broker to dashboard...",
+        diagnostics
+      });
+
+    } catch (err: any) {
+      failStep("account_provisioning", err);
+
+      const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || (err.details && err.details.status) || 400;
+      const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+      diagnostics.error = serializeError(err);
+
+      console.error("[CONNECT API] Complete error object:", err);
+
+      return res.status(finalStatus).json({
+        success: false,
+        error: `MT5 Provisioning Failure: ${err.message || String(err)}. Please verify your credentials.`,
+        message: err.message || String(err),
+        stack: err.stack,
+        metaapiError: serializeError(err),
+        statusCode: finalStatus,
+        diagnostics
+      });
     }
-
-    return res.json({
-      success: true,
-      accountId: accountId,
-      state: account.state,
-      connectionStatus: account.connectionStatus,
-      requiresPolling: true,
-      message: "MT5 account deployed on MetaApi secure cloud. Linking broker to dashboard...",
-      diagnostics
-    });
-
-  } catch (err: any) {
-    failStep("account_provisioning", err);
-
-    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || (err.details && err.details.status) || 400;
-    const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
-    diagnostics.error = serializeError(err);
-
-    console.error("[CONNECT API] Complete error object:", err);
-
-    return res.status(finalStatus).json({
-      success: false,
-      error: `MT5 Provisioning Failure: ${err.message || String(err)}. Please verify your credentials.`,
-      message: err.message || String(err),
-      stack: err.stack,
-      metaapiError: serializeError(err),
-      statusCode: finalStatus,
-      diagnostics
-    });
   }
 }
 
@@ -1040,65 +1296,182 @@ export async function handleStatusAccount(req: Request, res: Response) {
     });
   }
 
-  let api: any;
-  try {
-    startStep("metaapi_init", "Initialize MetaApi SDK");
-    await ensureMetaApiLoaded();
-    api = new MetaApi(token);
-    completeStep("metaapi_init");
-  } catch (err: any) {
-    failStep("metaapi_init", err);
-    console.error("[STATUS API] MetaApi initialization failed:", err);
-    return res.status(500).json({
-      success: false,
-      error: `MetaApi initialization failed: ${err.message}`,
-      message: err.message,
-      stack: err.stack,
-      metaapiError: serializeError(err),
-      statusCode: 500,
-      diagnostics
-    });
-  }
-
-  let account: any;
-  try {
-    startStep("get_account", "Fetch MetaApi Metatrader account instance");
-    account = await api.metatraderAccountApi.getAccount(accountId);
-    completeStep("get_account", { state: account.state, connectionStatus: account.connectionStatus });
-  } catch (err: any) {
-    failStep("get_account", err);
-    
-    const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || 400;
-    const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
-    diagnostics.error = serializeError(err);
-    console.error("[STATUS API] getAccount failed:", err);
-
-    return res.status(finalStatus).json({
-      success: false,
-      error: `Failed to fetch MetaApi account details: ${err.message}`,
-      message: err.message,
-      stack: err.stack,
-      metaapiError: serializeError(err),
-      statusCode: finalStatus,
-      diagnostics
-    });
-  }
-
-  if (account.state !== "DEPLOYED") {
+  if (process.env.VERCEL) {
     try {
-      startStep("deploy_account", "Deploying undeployed account");
-      await account.deploy();
-      completeStep("deploy_account");
+      startStep("metaapi_init", "Initialize MetaApi Direct REST Client");
+      const client = new MetaApiRestClient(token);
+      completeStep("metaapi_init");
+
+      startStep("get_account", "Fetch MetaApi Metatrader account instance via Direct REST API");
+      const account = await client.getAccount(accountId);
+      completeStep("get_account", { state: account.state, connectionStatus: account.connectionStatus });
+
+      if (account.state !== "DEPLOYED") {
+        try {
+          startStep("deploy_account", "Deploying undeployed account via Direct REST API");
+          await client.deploy(accountId);
+          completeStep("deploy_account");
+        } catch (err: any) {
+          failStep("deploy_account", err);
+          const exactStatusCode = err.status || err.statusCode || 400;
+          const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+          diagnostics.error = serializeError(err);
+          console.error("[STATUS API] REST deploy failed:", err);
+
+          return res.status(finalStatus).json({
+            success: false,
+            error: `Failed to redeploy account: ${err.message}`,
+            message: err.message,
+            stack: err.stack,
+            metaapiError: serializeError(err),
+            statusCode: finalStatus,
+            diagnostics
+          });
+        }
+
+        return res.json({
+          success: true,
+          completed: false,
+          accountId,
+          state: account.state,
+          connectionStatus: account.connectionStatus,
+          message: `Account is being deployed. Current state: ${account.state}`,
+          diagnostics
+        });
+      }
+
+      if (account.connectionStatus !== "CONNECTED") {
+        return res.json({
+          success: true,
+          completed: false,
+          accountId,
+          state: account.state,
+          connectionStatus: account.connectionStatus,
+          message: `MetaApi is linking your account to MetaTrader server... Status: ${account.connectionStatus}`,
+          diagnostics
+        });
+      }
+
+      // If CONNECTED, perform full REST sync
+      try {
+        // Step A: Ensure MetaStats is enabled on the account
+        startStep("enable_metastats", "Ensure MetaStats API is enabled on account via REST");
+        if (!account.metastatsApiEnabled) {
+          console.log(`[STATUS API] MetaStats is not enabled on account ${accountId}. Enabling it now via REST...`);
+          await client.enableMetaStatsApi(accountId);
+        }
+        completeStep("enable_metastats");
+
+        // Step B: Fetch account metrics via REST
+        startStep("metastats_get_metrics", "Fetch live account metrics via MetaStats Direct REST API");
+        const metrics = await client.getMetrics(accountId, account);
+        completeStep("metastats_get_metrics", { balance: metrics.balance });
+
+        // Step C: Fetch historical trades via REST
+        startStep("metastats_get_trades", "Fetch historical trades via MetaStats Direct REST API");
+        const startTime = "2020-01-01 00:00:00.000";
+        const endTime = new Date().toISOString().replace("T", " ").replace("Z", "");
+        const metastatsTrades = await client.getAccountTrades(accountId, startTime, endTime, account);
+        completeStep("metastats_get_trades", { tradesCount: metastatsTrades?.length || 0 });
+
+        // Step D: Reconstruct trades and save them to Firestore
+        startStep("save_firestore", "Convert trades and save them to Firestore");
+        const mapped = convertMetaStatsTradesToAppTrades(metastatsTrades, accountId);
+        
+        const accountInfo = {
+          balance: metrics.balance || 10000,
+          equity: metrics.equity || 10000,
+          broker: account.server || "MetaTrader 5 Account",
+          currency: metrics.currency || "USD"
+        };
+
+        if (email) {
+          await saveSyncedDataToDatabase(email, accountId, mapped, accountInfo);
+        }
+        completeStep("save_firestore", { tradesImported: mapped.length });
+
+        return res.json({
+          success: true,
+          completed: true,
+          accountId,
+          state: account.state,
+          connectionStatus: account.connectionStatus,
+          tradesImported: mapped.length,
+          accountInfo,
+          message: `Successfully synchronized and loaded ${mapped.length} trades!`,
+          diagnostics
+        });
+
+      } catch (err: any) {
+        failStep("data_fetch_and_sync", err);
+        const exactStatusCode = err.status || err.statusCode || 400;
+        const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+        diagnostics.error = serializeError(err);
+        console.error("[STATUS API] REST Sync fallback execution failed:", err);
+        return res.status(finalStatus).json({
+          success: false,
+          error: `REST Sync Execution Failed: ${err.message || String(err)}`,
+          message: err.message,
+          stack: err.stack,
+          metaapiError: serializeError(err),
+          statusCode: finalStatus,
+          diagnostics
+        });
+      }
+
     } catch (err: any) {
-      failStep("deploy_account", err);
+      failStep("account_retrieval", err);
       const exactStatusCode = err.status || err.statusCode || 400;
       const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
       diagnostics.error = serializeError(err);
-      console.error("[STATUS API] deploy failed:", err);
+      console.error("[STATUS API] Direct REST Account fetch failed:", err);
+      return res.status(finalStatus).json({
+        success: false,
+        error: `Failed to fetch MetaApi account details via Direct REST: ${err.message || String(err)}`,
+        message: err.message,
+        stack: err.stack,
+        metaapiError: serializeError(err),
+        statusCode: finalStatus,
+        diagnostics
+      });
+    }
+  } else {
+    let api: any;
+    try {
+      startStep("metaapi_init", "Initialize MetaApi SDK");
+      await ensureMetaApiLoaded();
+      api = new MetaApi(token);
+      completeStep("metaapi_init");
+    } catch (err: any) {
+      failStep("metaapi_init", err);
+      console.error("[STATUS API] MetaApi initialization failed:", err);
+      return res.status(500).json({
+        success: false,
+        error: `MetaApi initialization failed: ${err.message}`,
+        message: err.message,
+        stack: err.stack,
+        metaapiError: serializeError(err),
+        statusCode: 500,
+        diagnostics
+      });
+    }
+
+    let account: any;
+    try {
+      startStep("get_account", "Fetch MetaApi Metatrader account instance");
+      account = await api.metatraderAccountApi.getAccount(accountId);
+      completeStep("get_account", { state: account.state, connectionStatus: account.connectionStatus });
+    } catch (err: any) {
+      failStep("get_account", err);
+      
+      const exactStatusCode = err.status || err.statusCode || (err.response && err.response.status) || 400;
+      const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+      diagnostics.error = serializeError(err);
+      console.error("[STATUS API] getAccount failed:", err);
 
       return res.status(finalStatus).json({
         success: false,
-        error: `Failed to redeploy account: ${err.message}`,
+        error: `Failed to fetch MetaApi account details: ${err.message}`,
         message: err.message,
         stack: err.stack,
         metaapiError: serializeError(err),
@@ -1107,191 +1480,215 @@ export async function handleStatusAccount(req: Request, res: Response) {
       });
     }
 
-    return res.json({
-      success: true,
-      completed: false,
-      accountId,
-      state: account.state,
-      connectionStatus: account.connectionStatus,
-      message: `Account is being deployed. Current state: ${account.state}`,
-      diagnostics
-    });
-  }
+    if (account.state !== "DEPLOYED") {
+      try {
+        startStep("deploy_account", "Deploying undeployed account");
+        await account.deploy();
+        completeStep("deploy_account");
+      } catch (err: any) {
+        failStep("deploy_account", err);
+        const exactStatusCode = err.status || err.statusCode || 400;
+        const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
+        diagnostics.error = serializeError(err);
+        console.error("[STATUS API] deploy failed:", err);
 
-  if (account.connectionStatus !== "CONNECTED") {
-    return res.json({
-      success: true,
-      completed: false,
-      accountId,
-      state: account.state,
-      connectionStatus: account.connectionStatus,
-      message: `MetaApi is linking your account to MetaTrader server... Status: ${account.connectionStatus}`,
-      diagnostics
-    });
-  }
+        return res.status(finalStatus).json({
+          success: false,
+          error: `Failed to redeploy account: ${err.message}`,
+          message: err.message,
+          stack: err.stack,
+          metaapiError: serializeError(err),
+          statusCode: finalStatus,
+          diagnostics
+        });
+      }
 
-  let connection: any;
-  let useMetaStatsFallback = false;
-
-  if (process.env.VERCEL) {
-    console.log("[VERCEL ENVIRONMENT] Status API: Bypassing WebSocket RPC connection, using MetaStats REST API fallback...");
-    useMetaStatsFallback = true;
-  } else {
-    try {
-      startStep("get_rpc_connection", "Acquire RPC connection to broker");
-      connection = account.getRPCConnection();
-      await connection.connect();
-      completeStep("get_rpc_connection");
-    } catch (err: any) {
-      console.warn("[STATUS API] RPC Connection failed, falling back to MetaStats REST API. Error:", err.message || err);
-      useMetaStatsFallback = true;
+      return res.json({
+        success: true,
+        completed: false,
+        accountId,
+        state: account.state,
+        connectionStatus: account.connectionStatus,
+        message: `Account is being deployed. Current state: ${account.state}`,
+        diagnostics
+      });
     }
-  }
 
-  if (!useMetaStatsFallback) {
-    try {
-      startStep("get_account_information", "Retrieve live account details using getAccountInformation");
-      const accountInfo: any = await withTimeout(
-        connection.getAccountInformation(),
-        15000,
-        "Timeout fetching account information via RPC."
-      );
-      completeStep("get_account_information", { balance: accountInfo.balance, broker: accountInfo.broker });
+    if (account.connectionStatus !== "CONNECTED") {
+      return res.json({
+        success: true,
+        completed: false,
+        accountId,
+        state: account.state,
+        connectionStatus: account.connectionStatus,
+        message: `MetaApi is linking your account to MetaTrader server... Status: ${account.connectionStatus}`,
+        diagnostics
+      });
+    }
 
-      startStep("get_deals", "Fetch historical deals from past year using getDealsByTimeRange");
-      const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-      const endTime = new Date();
-      const deals: any = await withTimeout(
-        connection.getDealsByTimeRange(startTime, endTime),
-        15000,
-        "Timeout fetching historical deals via RPC."
-      );
-      completeStep("get_deals", { dealsCount: deals?.length || 0 });
+    let connection: any;
+    let useMetaStatsFallback = false;
 
-      startStep("save_firestore", "Reconstruct trades and save them to Firestore");
-      const reconstructed = reconstructTradesFromDeals(deals, accountId);
-      
-      if (email) {
-        await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
+    if (process.env.VERCEL) {
+      console.log("[VERCEL ENVIRONMENT] Status API: Bypassing WebSocket RPC connection, using MetaStats REST API fallback...");
+      useMetaStatsFallback = true;
+    } else {
+      try {
+        startStep("get_rpc_connection", "Acquire RPC connection to broker");
+        connection = account.getRPCConnection();
+        await connection.connect();
+        completeStep("get_rpc_connection");
+      } catch (err: any) {
+        console.warn("[STATUS API] RPC Connection failed, falling back to MetaStats REST API. Error:", err.message || err);
+        useMetaStatsFallback = true;
+      }
+    }
+
+    if (!useMetaStatsFallback) {
+      try {
+        startStep("get_account_information", "Retrieve live account details using getAccountInformation");
+        const accountInfo: any = await withTimeout(
+          connection.getAccountInformation(),
+          15000,
+          "Timeout fetching account information via RPC."
+        );
+        completeStep("get_account_information", { balance: accountInfo.balance, broker: accountInfo.broker });
+
+        startStep("get_deals", "Fetch historical deals from past year using getDealsByTimeRange");
+        const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+        const endTime = new Date();
+        const deals: any = await withTimeout(
+          connection.getDealsByTimeRange(startTime, endTime),
+          15000,
+          "Timeout fetching historical deals via RPC."
+        );
+        completeStep("get_deals", { dealsCount: deals?.length || 0 });
+
+        startStep("save_firestore", "Reconstruct trades and save them to Firestore");
+        const reconstructed = reconstructTradesFromDeals(deals, accountId);
         
-        if (!process.env.VERCEL) {
-          await syncRegistry.startSync(accountId, email, token);
+        if (email) {
+          await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
+          
+          if (!process.env.VERCEL) {
+            await syncRegistry.startSync(accountId, email, token);
+          }
         }
+        completeStep("save_firestore", { tradesImported: reconstructed.length });
+
+        try {
+          await connection.close();
+        } catch (closeErr: any) {
+          console.error("[STATUS API] Warning: error closing RPC connection:", closeErr.message || closeErr);
+        }
+
+        return res.json({
+          success: true,
+          completed: true,
+          accountId,
+          state: account.state,
+          connectionStatus: account.connectionStatus,
+          tradesImported: reconstructed.length,
+          accountInfo: {
+            balance: accountInfo.balance || 10000,
+            equity: accountInfo.equity || 10000,
+            broker: accountInfo.broker || "MetaTrader 5 Account",
+            currency: accountInfo.currency || "USD"
+          },
+          message: `Successfully synchronized and loaded ${reconstructed.length} trades!`,
+          diagnostics
+        });
+
+      } catch (err: any) {
+        failStep("data_fetch_and_sync", err);
+
+        try {
+          await connection.close();
+        } catch (closeErr: any) {
+          console.error("[STATUS API] Warning: error closing RPC connection on failure:", closeErr.message || closeErr);
+        }
+
+        console.warn("[STATUS API] RPC Fetch failed, falling back to MetaStats REST API...");
+        useMetaStatsFallback = true;
       }
-      completeStep("save_firestore", { tradesImported: reconstructed.length });
-
-      try {
-        await connection.close();
-      } catch (closeErr: any) {
-        console.error("[STATUS API] Warning: error closing RPC connection:", closeErr.message || closeErr);
-      }
-
-      return res.json({
-        success: true,
-        completed: true,
-        accountId,
-        state: account.state,
-        connectionStatus: account.connectionStatus,
-        tradesImported: reconstructed.length,
-        accountInfo: {
-          balance: accountInfo.balance || 10000,
-          equity: accountInfo.equity || 10000,
-          broker: accountInfo.broker || "MetaTrader 5 Account",
-          currency: accountInfo.currency || "USD"
-        },
-        message: `Successfully synchronized and loaded ${reconstructed.length} trades!`,
-        diagnostics
-      });
-
-    } catch (err: any) {
-      failStep("data_fetch_and_sync", err);
-
-      try {
-        await connection.close();
-      } catch (closeErr: any) {
-        console.error("[STATUS API] Warning: error closing RPC connection on failure:", closeErr.message || closeErr);
-      }
-
-      console.warn("[STATUS API] RPC Fetch failed, falling back to MetaStats REST API...");
-      useMetaStatsFallback = true;
     }
-  }
 
-  if (useMetaStatsFallback) {
-    try {
-      // Step A: Ensure MetaStats is enabled on the account
-      startStep("enable_metastats", "Ensure MetaStats API is enabled on account");
-      if (!account.metastatsApiEnabled) {
-        console.log(`[STATUS API] MetaStats is not enabled on account ${accountId}. Enabling it now...`);
-        await account.enableMetaStatsApi();
+    if (useMetaStatsFallback) {
+      try {
+        // Step A: Ensure MetaStats is enabled on the account
+        startStep("enable_metastats", "Ensure MetaStats API is enabled on account");
+        if (!account.metastatsApiEnabled) {
+          console.log(`[STATUS API] MetaStats is not enabled on account ${accountId}. Enabling it now...`);
+          await account.enableMetaStatsApi();
+        }
+        completeStep("enable_metastats");
+
+        // Step B: Initialize MetaStats SDK
+        startStep("metastats_init", "Initialize MetaStats REST API client");
+        const metaStats = new MetaStats(token);
+        completeStep("metastats_init");
+
+        // Step C: Fetch account metrics via REST
+        startStep("metastats_get_metrics", "Fetch live account metrics via MetaStats REST API");
+        const metrics: any = await withTimeout(
+          metaStats.getMetrics(accountId),
+          15000,
+          "Timeout fetching account metrics via MetaStats REST."
+        );
+        completeStep("metastats_get_metrics", { balance: metrics.balance });
+
+        // Step D: Fetch historical trades via REST
+        startStep("metastats_get_trades", "Fetch historical trades via MetaStats REST API");
+        const startTime = "2020-01-01 00:00:00.000";
+        const endTime = new Date().toISOString().replace("T", " ").replace("Z", "");
+        const metastatsTrades: any = await withTimeout(
+          metaStats.getAccountTrades(accountId, startTime, endTime),
+          15000,
+          "Timeout fetching historical trades via MetaStats REST."
+        );
+        completeStep("metastats_get_trades", { tradesCount: metastatsTrades?.length || 0 });
+
+        // Step E: Map trades and save to Firestore
+        startStep("save_firestore", "Map MetaStats trades and save to Firestore");
+        const reconstructed = convertMetaStatsTradesToAppTrades(metastatsTrades, accountId);
+        
+        const accountInfo = {
+          balance: metrics.balance || 10000,
+          equity: metrics.equity || 10000,
+          broker: account.broker || "MetaTrader 5 Account",
+          currency: metrics.currency || "USD"
+        };
+
+        if (email) {
+          await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
+        }
+        completeStep("save_firestore", { tradesImported: reconstructed.length });
+
+        return res.json({
+          success: true,
+          completed: true,
+          accountId,
+          state: account.state,
+          connectionStatus: account.connectionStatus,
+          tradesImported: reconstructed.length,
+          accountInfo,
+          message: `Successfully synchronized and loaded ${reconstructed.length} trades via secure serverless fallback!`,
+          diagnostics
+        });
+
+      } catch (metastatsErr: any) {
+        failStep("metastats_fallback_failure", metastatsErr);
+        console.error("[STATUS API] MetaStats fallback also failed:", metastatsErr);
+        return res.status(400).json({
+          success: false,
+          error: `MT5 serverless connection failed. Both WebSocket RPC and REST Fallback failed. Error: ${metastatsErr.message || String(metastatsErr)}`,
+          message: metastatsErr.message,
+          stack: metastatsErr.stack,
+          metaapiError: serializeError(metastatsErr),
+          statusCode: 400,
+          diagnostics
+        });
       }
-      completeStep("enable_metastats");
-
-      // Step B: Initialize MetaStats SDK
-      startStep("metastats_init", "Initialize MetaStats REST API client");
-      const metaStats = new MetaStats(token);
-      completeStep("metastats_init");
-
-      // Step C: Fetch account metrics via REST
-      startStep("metastats_get_metrics", "Fetch live account metrics via MetaStats REST API");
-      const metrics: any = await withTimeout(
-        metaStats.getMetrics(accountId),
-        15000,
-        "Timeout fetching account metrics via MetaStats REST."
-      );
-      completeStep("metastats_get_metrics", { balance: metrics.balance });
-
-      // Step D: Fetch historical trades via REST
-      startStep("metastats_get_trades", "Fetch historical trades via MetaStats REST API");
-      const startTime = "2020-01-01 00:00:00.000";
-      const endTime = new Date().toISOString().replace("T", " ").replace("Z", "");
-      const metastatsTrades: any = await withTimeout(
-        metaStats.getAccountTrades(accountId, startTime, endTime),
-        15000,
-        "Timeout fetching historical trades via MetaStats REST."
-      );
-      completeStep("metastats_get_trades", { tradesCount: metastatsTrades?.length || 0 });
-
-      // Step E: Map trades and save to Firestore
-      startStep("save_firestore", "Map MetaStats trades and save to Firestore");
-      const reconstructed = convertMetaStatsTradesToAppTrades(metastatsTrades, accountId);
-      
-      const accountInfo = {
-        balance: metrics.balance || 10000,
-        equity: metrics.equity || 10000,
-        broker: account.broker || "MetaTrader 5 Account",
-        currency: metrics.currency || "USD"
-      };
-
-      if (email) {
-        await saveSyncedDataToDatabase(email, accountId, reconstructed, accountInfo);
-      }
-      completeStep("save_firestore", { tradesImported: reconstructed.length });
-
-      return res.json({
-        success: true,
-        completed: true,
-        accountId,
-        state: account.state,
-        connectionStatus: account.connectionStatus,
-        tradesImported: reconstructed.length,
-        accountInfo,
-        message: `Successfully synchronized and loaded ${reconstructed.length} trades via secure serverless fallback!`,
-        diagnostics
-      });
-
-    } catch (metastatsErr: any) {
-      failStep("metastats_fallback_failure", metastatsErr);
-      console.error("[STATUS API] MetaStats fallback also failed:", metastatsErr);
-      return res.status(400).json({
-        success: false,
-        error: `MT5 serverless connection failed. Both WebSocket RPC and REST Fallback failed. Error: ${metastatsErr.message || String(metastatsErr)}`,
-        message: metastatsErr.message,
-        stack: metastatsErr.stack,
-        metaapiError: serializeError(metastatsErr),
-        statusCode: 400,
-        diagnostics
-      });
     }
   }
 }
@@ -1331,120 +1728,21 @@ export async function handleSyncAccount(req: Request, res: Response) {
     });
   }
 
-  let api: any;
-  let account: any;
-  try {
-    await ensureMetaApiLoaded();
-    api = new MetaApi(token);
-    account = await api.metatraderAccountApi.getAccount(accountId);
-  } catch (err: any) {
-    console.error(`[SYNC API] Failed to fetch account ${accountId}:`, err);
-    return res.status(400).json({
-      success: false,
-      error: `Failed to fetch account: ${err.message}`
-    });
-  }
-
-  let connection: any;
-  let useMetaStatsFallback = false;
-
   if (process.env.VERCEL) {
-    console.log("[VERCEL ENVIRONMENT] Sync API: Bypassing WebSocket RPC connection, using MetaStats REST API fallback...");
-    useMetaStatsFallback = true;
-  } else {
     try {
-      if (account.state !== "DEPLOYED") {
-        await account.deploy();
-      }
-
-      console.log(`[SYNC API] Waiting for account ${accountId} to connect to broker (Timeout: 20s)...`);
-      await withTimeout(
-        account.waitConnected(),
-        20000,
-        `Timeout waiting for account ${accountId} to connect to broker.`
-      );
-
-      console.log(`[SYNC API] Connecting RPC...`);
-      connection = account.getRPCConnection();
-      await connection.connect();
-    } catch (err: any) {
-      console.warn("[SYNC API] RPC Connection/connect failed, falling back to MetaStats. Error:", err.message || err);
-      useMetaStatsFallback = true;
-    }
-  }
-
-  if (!useMetaStatsFallback) {
-    try {
-      console.log(`[SYNC API] Fetching account info via RPC...`);
-      const accountInfo = await withTimeout(
-        connection.getAccountInformation(),
-        15000,
-        "Timeout fetching account information via RPC."
-      ) as any;
-
-      console.log(`[SYNC API] Fetching deals via RPC...`);
-      const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-      const endTime = new Date();
-      const deals = await withTimeout(
-        connection.getDealsByTimeRange(startTime, endTime),
-        15000,
-        "Timeout fetching historical deals via RPC."
-      );
-      const mapped = reconstructTradesFromDeals(deals, accountId);
-
-      // Close RPC connection cleanly
-      try {
-        await connection.close();
-      } catch (closeErr: any) {
-        console.error("[SYNC API] Warning: error closing RPC connection on success:", closeErr.message || closeErr);
-      }
-
-      return res.json({
-        success: true,
-        accountInfo: {
-          balance: accountInfo.balance || 10000,
-          equity: accountInfo.equity || 10000,
-          broker: accountInfo.broker || "MetaTrader 5 Account",
-          currency: accountInfo.currency || "USD"
-        },
-        trades: mapped
-      });
-    } catch (innerErr: any) {
-      // Clean up RPC connection on query failure
-      try {
-        await connection.close();
-      } catch (closeErr: any) {
-        console.error("[SYNC API] Warning: error closing RPC connection on failure:", closeErr.message || closeErr);
-      }
-      console.warn("[SYNC API] RPC Queries failed, falling back to MetaStats. Error:", innerErr.message || innerErr);
-      useMetaStatsFallback = true;
-    }
-  }
-
-  if (useMetaStatsFallback) {
-    try {
+      console.log("[SYNC API] Vercel environment: Performing forced sync using Direct REST API client...");
+      const client = new MetaApiRestClient(token);
+      const account = await client.getAccount(accountId);
+      
       if (!account.metastatsApiEnabled) {
-        console.log(`[SYNC API] MetaStats is not enabled on account ${accountId}. Enabling it now...`);
-        await account.enableMetaStatsApi();
+        await client.enableMetaStatsApi(accountId);
       }
 
-      const metaStats = new MetaStats(token);
-
-      console.log(`[SYNC API] Fetching metrics via MetaStats REST API...`);
-      const metrics: any = await withTimeout(
-        metaStats.getMetrics(accountId),
-        15000,
-        "Timeout fetching account metrics via MetaStats REST."
-      );
-
-      console.log(`[SYNC API] Fetching trades via MetaStats REST API...`);
+      const metrics = await client.getMetrics(accountId, account);
+      
       const startTime = "2020-01-01 00:00:00.000";
       const endTime = new Date().toISOString().replace("T", " ").replace("Z", "");
-      const metastatsTrades: any = await withTimeout(
-        metaStats.getAccountTrades(accountId, startTime, endTime),
-        15000,
-        "Timeout fetching historical trades via MetaStats REST."
-      );
+      const metastatsTrades = await client.getAccountTrades(accountId, startTime, endTime, account);
 
       const mapped = convertMetaStatsTradesToAppTrades(metastatsTrades, accountId);
 
@@ -1453,18 +1751,156 @@ export async function handleSyncAccount(req: Request, res: Response) {
         accountInfo: {
           balance: metrics.balance || 10000,
           equity: metrics.equity || 10000,
-          broker: account.broker || "MetaTrader 5 Account",
+          broker: account.server || "MetaTrader 5 Account",
           currency: metrics.currency || "USD"
         },
         trades: mapped
       });
 
-    } catch (metastatsErr: any) {
-      console.error(`[SYNC API] MetaStats fallback failure for account ${accountId}:`, metastatsErr);
+    } catch (err: any) {
+      console.error("[SYNC API] Forced REST Sync failed:", err);
       return res.status(400).json({
         success: false,
-        error: `MT5 Sync Failed: WebSocket and REST Fallback both failed. Error: ${metastatsErr.message || String(metastatsErr)}`
+        error: `MT5 Sync Failed via Direct REST: ${err.message || String(err)}`
       });
+    }
+  } else {
+    let api: any;
+    let account: any;
+    try {
+      await ensureMetaApiLoaded();
+      api = new MetaApi(token);
+      account = await api.metatraderAccountApi.getAccount(accountId);
+    } catch (err: any) {
+      console.error(`[SYNC API] Failed to fetch account ${accountId}:`, err);
+      return res.status(400).json({
+        success: false,
+        error: `Failed to fetch account: ${err.message}`
+      });
+    }
+
+    let connection: any;
+    let useMetaStatsFallback = false;
+
+    if (process.env.VERCEL) {
+      console.log("[VERCEL ENVIRONMENT] Sync API: Bypassing WebSocket RPC connection, using MetaStats REST API fallback...");
+      useMetaStatsFallback = true;
+    } else {
+      try {
+        if (account.state !== "DEPLOYED") {
+          await account.deploy();
+        }
+
+        console.log(`[SYNC API] Waiting for account ${accountId} to connect to broker (Timeout: 20s)...`);
+        await withTimeout(
+          account.waitConnected(),
+          20000,
+          `Timeout waiting for account ${accountId} to connect to broker.`
+        );
+
+        console.log(`[SYNC API] Connecting RPC...`);
+        connection = account.getRPCConnection();
+        await connection.connect();
+      } catch (err: any) {
+        console.warn("[SYNC API] RPC Connection/connect failed, falling back to MetaStats. Error:", err.message || err);
+        useMetaStatsFallback = true;
+      }
+    }
+
+    if (!useMetaStatsFallback) {
+      try {
+        console.log(`[SYNC API] Fetching account info via RPC...`);
+        const accountInfo = await withTimeout(
+          connection.getAccountInformation(),
+          15000,
+          "Timeout fetching account information via RPC."
+        ) as any;
+
+        console.log(`[SYNC API] Fetching deals via RPC...`);
+        const startTime = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+        const endTime = new Date();
+        const deals = await withTimeout(
+          connection.getDealsByTimeRange(startTime, endTime),
+          15000,
+          "Timeout fetching historical deals via RPC."
+        );
+
+        const mapped = reconstructTradesFromDeals(deals, accountId);
+
+        // Close RPC connection cleanly
+        try {
+          await connection.close();
+        } catch (closeErr: any) {
+          console.error("[SYNC API] Warning: error closing RPC connection on success:", closeErr.message || closeErr);
+        }
+
+        return res.json({
+          success: true,
+          accountInfo: {
+            balance: accountInfo.balance || 10000,
+            equity: accountInfo.equity || 10000,
+            broker: accountInfo.broker || "MetaTrader 5 Account",
+            currency: accountInfo.currency || "USD"
+          },
+          trades: mapped
+        });
+      } catch (innerErr: any) {
+        // Clean up RPC connection on query failure
+        try {
+          await connection.close();
+        } catch (closeErr: any) {
+          console.error("[SYNC API] Warning: error closing RPC connection on failure:", closeErr.message || closeErr);
+        }
+        console.warn("[SYNC API] RPC Queries failed, falling back to MetaStats. Error:", innerErr.message || innerErr);
+        useMetaStatsFallback = true;
+      }
+    }
+
+    if (useMetaStatsFallback) {
+      try {
+        if (!account.metastatsApiEnabled) {
+          console.log(`[SYNC API] MetaStats is not enabled on account ${accountId}. Enabling it now...`);
+          await account.enableMetaStatsApi();
+        }
+
+        const metaStats = new MetaStats(token);
+
+        console.log(`[SYNC API] Fetching metrics via MetaStats REST API...`);
+        const metrics: any = await withTimeout(
+          metaStats.getMetrics(accountId),
+          15000,
+          "Timeout fetching account metrics via MetaStats REST."
+        );
+
+        console.log(`[SYNC API] Fetching trades via MetaStats REST API...`);
+        const startTime = "2020-01-01 00:00:00.000";
+        const endTime = new Date().toISOString().replace("T", " ").replace("Z", "");
+        const metastatsTrades: any = await withTimeout(
+          metaStats.getAccountTrades(accountId, startTime, endTime),
+          15000,
+          "Timeout fetching historical trades via MetaStats REST."
+        );
+
+        const mapped = convertMetaStatsTradesToAppTrades(metastatsTrades, accountId);
+
+        return res.json({
+          success: true,
+          accountInfo: {
+            balance: metrics.balance || 10000,
+            equity: metrics.equity || 10000,
+            broker: account.broker || "MetaTrader 5 Account",
+            currency: metrics.currency || "USD"
+          },
+          trades: mapped
+        });
+
+      } catch (metastatsErr: any) {
+        console.error(`[SYNC API] MetaStats fallback failure for account ${accountId}:`, metastatsErr);
+        return res.status(400).json({
+          success: false,
+          error: `MT5 Sync Failed: WebSocket and REST Fallback both failed. Error: ${metastatsErr.message || String(metastatsErr)}`
+        });
+      }
     }
   }
 }
