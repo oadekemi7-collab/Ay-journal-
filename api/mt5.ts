@@ -163,6 +163,18 @@ export class MetaApiRestClient {
     }
   }
 
+  async updateAccount(accountId: string, params: any): Promise<void> {
+    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}`, {
+      method: "PUT",
+      headers: await this.getAuthHeaders(),
+      body: JSON.stringify(params)
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to update account ${accountId} (HTTP ${res.status}): ${text}`);
+    }
+  }
+
   async enableMetaStatsApi(accountId: string): Promise<void> {
     const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}/enable-metastats-api`, {
       method: "POST",
@@ -1077,23 +1089,28 @@ export async function handleConnectMT5(req: Request, res: Response) {
         });
         completeStep("create_account", { accountId: account.id });
       } else {
-        console.log(`[CONNECT API] Located existing MetaApi account via REST: ${account.id} (State: ${account.state})`);
+        console.log(`[CONNECT API] Located existing MetaApi account via REST: ${account.id}. Updating password...`);
+        startStep("update_account", "Update existing account credentials via Direct REST API");
+        await client.updateAccount(account.id, {
+          password: password,
+          name: `Journaly - MT5 ${login}`
+        });
+        completeStep("update_account");
       }
 
       const accountId = account.id;
 
-      if (account.state !== "DEPLOYED") {
-        startStep("deploy_account", "Trigger cloud deployment using Direct REST API");
-        await client.deploy(accountId);
-        try {
-          const updated = await client.getAccount(accountId);
-          account.state = updated.state;
-          account.connectionStatus = updated.connectionStatus;
-        } catch (refreshErr) {
-          console.warn("[CONNECT API] Failed to refresh state after deployment:", refreshErr);
-        }
-        completeStep("deploy_account");
+      // Always deploy/redeploy to ensure connection is refreshed and uses the new credentials
+      startStep("deploy_account", "Trigger cloud deployment using Direct REST API");
+      await client.deploy(accountId);
+      try {
+        const updated = await client.getAccount(accountId);
+        account.state = updated.state;
+        account.connectionStatus = updated.connectionStatus;
+      } catch (refreshErr) {
+        console.warn("[CONNECT API] Failed to refresh state after deployment:", refreshErr);
       }
+      completeStep("deploy_account");
 
       return res.json({
         success: true,
@@ -1166,16 +1183,21 @@ export async function handleConnectMT5(req: Request, res: Response) {
         } as any);
         completeStep("create_account", { accountId: account.id });
       } else {
-        console.log(`[CONNECT API] Located existing MetaApi account: ${account.id} (State: ${account.state})`);
+        console.log(`[CONNECT API] Located existing MetaApi account: ${account.id}. Updating credentials...`);
+        startStep("update_account", "Update existing account credentials");
+        await account.update({
+          password: password,
+          name: `Journaly - MT5 ${login}`
+        });
+        completeStep("update_account");
       }
 
       const accountId = account.id;
 
-      if (account.state !== "DEPLOYED") {
-        startStep("deploy_account", "Trigger cloud deployment using account.deploy");
-        await account.deploy();
-        completeStep("deploy_account");
-      }
+      // Always deploy/redeploy to refresh connection and apply potential credential changes
+      startStep("deploy_account", "Trigger cloud deployment using account.deploy");
+      await account.deploy();
+      completeStep("deploy_account");
 
       return res.json({
         success: true,
