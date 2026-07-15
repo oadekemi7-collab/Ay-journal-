@@ -1,25 +1,87 @@
 import "./patch";
 import { Request, Response } from "express";
 import dns from "dns";
-import MetaApiPkg from "metaapi.cloud-sdk/node";
 
 let MetaApi: any;
 let SynchronizationListener: any;
 let MetaStats: any;
+let MemoryHistoryStorage: any;
+let isMetaApiLoaded = false;
+let metaApiLoadError: any = null;
 
-try {
-  if (MetaApiPkg) {
-    MetaApi = (MetaApiPkg as any).default || MetaApiPkg;
-    SynchronizationListener = (MetaApiPkg as any).SynchronizationListener || 
-                              ((MetaApiPkg as any).default && (MetaApiPkg as any).default.SynchronizationListener);
-    MetaStats = (MetaApiPkg as any).MetaStats || 
-                ((MetaApiPkg as any).default && (MetaApiPkg as any).default.MetaStats);
+async function ensureMetaApiLoaded() {
+  if (isMetaApiLoaded) return;
+  try {
+    console.log("[METAAPI] Dynamically importing metaapi.cloud-sdk/node...");
+    const MetaApiPkg = await import("metaapi.cloud-sdk/node") as any;
+    if (MetaApiPkg) {
+      MetaApi = MetaApiPkg.default || MetaApiPkg;
+      if (typeof MetaApi !== "function" && MetaApiPkg.default) {
+        MetaApi = MetaApiPkg.default;
+      }
+      SynchronizationListener = MetaApiPkg.SynchronizationListener || 
+                                (MetaApiPkg.default && (MetaApiPkg.default as any).SynchronizationListener);
+      MetaStats = MetaApiPkg.MetaStats || 
+                  (MetaApiPkg.default && (MetaApiPkg.default as any).MetaStats);
+      MemoryHistoryStorage = MetaApiPkg.MemoryHistoryStorage || 
+                             (MetaApiPkg.default && (MetaApiPkg.default as any).MemoryHistoryStorage);
+      
+      console.log("[METAAPI] Dynamically loaded MetaApi package components successfully.");
+    }
+    isMetaApiLoaded = true;
+  } catch (err: any) {
+    metaApiLoadError = err;
+    console.error("[METAAPI DYNAMIC LOAD ERROR] Failed to import metaapi.cloud-sdk/node:", err);
+    throw new Error(`MetaApi SDK is not available in this environment. Error: ${err.message || String(err)}`);
   }
-} catch (err) {
-  console.error("[METAAPI INITIALIZATION ERROR] Failed to resolve MetaApi package elements:", err);
 }
 
-const SafeSynchronizationListener = SynchronizationListener || class {};
+function createCustomSyncListener(email: string, accountId: string, connection: any) {
+  const BaseClass = SynchronizationListener || class {};
+  const CustomSyncListener = class extends BaseClass {
+    private email: string;
+    private accountId: string;
+    private connection: any;
+
+    constructor(email: string, accountId: string, connection: any) {
+      super();
+      this.email = email;
+      this.accountId = accountId;
+      this.connection = connection;
+    }
+
+    async onDealAdded(instanceIndex: string, deal: any) {
+      console.log(`[STREAMING] 🔔 New deal added on MT5 for ${this.accountId}:`, deal);
+      try {
+        const historyStorage = this.connection.historyStorage;
+        const deals = historyStorage.deals || [];
+        const mapped = reconstructTradesFromDeals(deals, this.accountId);
+        
+        const terminalState = this.connection.terminalState;
+        const accountInformation = terminalState.accountInformation || {};
+
+        await saveSyncedDataToDatabase(this.email, this.accountId, mapped, accountInformation);
+      } catch (err) {
+        console.error(`[STREAMING] Failed to handle onDealAdded event for ${this.email}:`, err);
+      }
+    }
+
+    async onAccountInformationUpdated(instanceIndex: string, accountInformation: any) {
+      console.log(`[STREAMING] 📈 Account info updated on MT5 for ${this.accountId}:`, accountInformation);
+      try {
+        await updateUserProfile(this.email, {
+          mt5Balance: Number(accountInformation.balance) || 10000,
+          mt5Equity: Number(accountInformation.equity) || 10000,
+          mt5Margin: Number(accountInformation.margin) || 0,
+          mt5SyncedAt: new Date().toISOString()
+        });
+      } catch (err) {
+        console.error(`[STREAMING] Failed to handle onAccountInformationUpdated event for ${this.email}:`, err);
+      }
+    }
+  };
+  return new CustomSyncListener(email, accountId, connection);
+}
 
 import { collection, query, where, getDocs } from "firebase/firestore";
 import { db, saveTradeToFirestore, updateUserProfile } from "../src/lib/firebase";
@@ -340,52 +402,7 @@ async function saveSyncedDataToDatabase(email: string, accountId: string, trades
   }
 }
 
-/**
- * Custom SynchronizationListener for real-time background updates
- */
-class CustomSyncListener extends SafeSynchronizationListener {
-  private email: string;
-  private accountId: string;
-  private connection: any;
 
-  constructor(email: string, accountId: string, connection: any) {
-    super();
-    this.email = email;
-    this.accountId = accountId;
-    this.connection = connection;
-  }
-
-  async onDealAdded(instanceIndex: string, deal: any) {
-    console.log(`[STREAMING] 🔔 New deal added on MT5 for ${this.accountId}:`, deal);
-    try {
-      const historyStorage = this.connection.historyStorage;
-      const deals = historyStorage.deals || [];
-      const mapped = reconstructTradesFromDeals(deals, this.accountId);
-      
-      const terminalState = this.connection.terminalState;
-      const accountInformation = terminalState.accountInformation || {};
-
-      await saveSyncedDataToDatabase(this.email, this.accountId, mapped, accountInformation);
-    } catch (err) {
-      console.error(`[STREAMING] Failed to handle onDealAdded event for ${this.email}:`, err);
-    }
-  }
-
-  async onAccountInformationUpdated(instanceIndex: string, accountInformation: any) {
-    console.log(`[STREAMING] 📈 Account info updated on MT5 for ${this.accountId}:`, accountInformation);
-    try {
-      // Verified via static import at top of file
-      await updateUserProfile(this.email, {
-        mt5Balance: Number(accountInformation.balance) || 10000,
-        mt5Equity: Number(accountInformation.equity) || 10000,
-        mt5Margin: Number(accountInformation.margin) || 0,
-        mt5SyncedAt: new Date().toISOString()
-      });
-    } catch (err) {
-      console.error(`[STREAMING] Failed to handle onAccountInformationUpdated event for ${this.email}:`, err);
-    }
-  }
-}
 
 /**
  * Background Sync Manager to maintain connection references and coordinate auto-sync
@@ -426,6 +443,7 @@ class MT5BackgroundSyncRegistry {
 
     let connection: any;
     try {
+      await ensureMetaApiLoaded();
       const api = new MetaApi(token);
       
       // Fetch account
@@ -445,7 +463,8 @@ class MT5BackgroundSyncRegistry {
       );
 
       // Retrieve streaming connection
-      connection = account.getStreamingConnection();
+      const storage = new MemoryHistoryStorage();
+      connection = account.getStreamingConnection(storage);
       await connection.connect();
 
       // Wait for synchronization with a 15-second timeout
@@ -457,7 +476,7 @@ class MT5BackgroundSyncRegistry {
       );
 
       // Register live synchronization listener
-      const listener = new CustomSyncListener(email, accountId, connection);
+      const listener = createCustomSyncListener(email, accountId, connection);
       connection.addSynchronizationListener(listener);
 
       this.pendingSyncs.delete(accountId);
@@ -851,6 +870,7 @@ export async function handleConnectMT5(req: Request, res: Response) {
   let accountApi: any;
   try {
     startStep("metaapi_init", "Initialize MetaApi SDK instance");
+    await ensureMetaApiLoaded();
     api = new MetaApi(token);
     accountApi = api.metatraderAccountApi;
     completeStep("metaapi_init");
@@ -1023,6 +1043,7 @@ export async function handleStatusAccount(req: Request, res: Response) {
   let api: any;
   try {
     startStep("metaapi_init", "Initialize MetaApi SDK");
+    await ensureMetaApiLoaded();
     api = new MetaApi(token);
     completeStep("metaapi_init");
   } catch (err: any) {
@@ -1313,6 +1334,7 @@ export async function handleSyncAccount(req: Request, res: Response) {
   let api: any;
   let account: any;
   try {
+    await ensureMetaApiLoaded();
     api = new MetaApi(token);
     account = await api.metatraderAccountApi.getAccount(accountId);
   } catch (err: any) {

@@ -1,10 +1,9 @@
 // Vercel Serverless Runtime Compatibility Patch for Read-only Filesystem
 try {
   if (process.env.VERCEL) {
-    process.cwd = () => "/tmp";
-    console.log(`[VERCEL COMPATIBILITY] Patched process.cwd to return "/tmp" for writeable filesystem access.`);
+    console.log(`[VERCEL COMPATIBILITY] Running on Vercel. MemoryHistoryStorage is enabled, process.cwd patch is not required.`);
   }
 } catch (err: any) {
-  console.error(`[VERCEL COMPATIBILITY ERROR] Failed to apply process.cwd patch:`, err.message || err);
+  console.error(`[VERCEL COMPATIBILITY ERROR] Failed:`, err.message || err);
 }
 
