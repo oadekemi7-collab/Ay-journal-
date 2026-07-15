@@ -13,7 +13,8 @@ async function ensureMetaApiLoaded() {
   if (isMetaApiLoaded) return;
   try {
     console.log("[METAAPI] Dynamically importing metaapi.cloud-sdk/node...");
-    const MetaApiPkg = await import("metaapi.cloud-sdk/node") as any;
+    const pkgName = "metaapi.cloud-sdk" + "/node";
+    const MetaApiPkg = await import(pkgName) as any;
     if (MetaApiPkg) {
       MetaApi = MetaApiPkg.default || MetaApiPkg;
       if (typeof MetaApi !== "function" && MetaApiPkg.default) {
