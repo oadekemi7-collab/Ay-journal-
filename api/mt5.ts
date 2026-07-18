@@ -16,35 +16,85 @@ async function ensureMetaApiLoaded() {
     const pkgName = "metaapi.cloud-sdk" + "/node";
     const MetaApiPkg = await import(pkgName) as any;
     if (MetaApiPkg) {
-      // Resolve MetaApi constructor supporting all possible module export formats
-      MetaApi = MetaApiPkg.MetaApi || 
-                (MetaApiPkg.default && MetaApiPkg.default.MetaApi) || 
-                MetaApiPkg.default || 
-                MetaApiPkg;
+      // 1. Resolve MetaApi constructor supporting all possible module export formats and bundler wrappers
+      const candidates = [
+        MetaApiPkg.MetaApi,
+        MetaApiPkg.default && MetaApiPkg.default.MetaApi,
+        MetaApiPkg.default && MetaApiPkg.default.default && MetaApiPkg.default.default.MetaApi,
+        MetaApiPkg.default && MetaApiPkg.default.default,
+        MetaApiPkg.default,
+        MetaApiPkg
+      ];
 
-      if (typeof MetaApi !== "function") {
-        console.warn("[METAAPI WARNING] Resolved MetaApi is not a constructor/function. Attempting fallbacks...");
-        if (MetaApiPkg.default && typeof MetaApiPkg.default === "function") {
-          MetaApi = MetaApiPkg.default;
-        } else if (typeof MetaApiPkg === "function") {
-          MetaApi = MetaApiPkg;
+      for (const candidate of candidates) {
+        if (typeof candidate === "function" && (candidate.name === "MetaApi" || (candidate.prototype && candidate.prototype.metatraderAccountApi))) {
+          MetaApi = candidate;
+          break;
         }
       }
 
-      // Resolve other package components supportively
-      SynchronizationListener = MetaApiPkg.SynchronizationListener || 
-                                (MetaApiPkg.default && (MetaApiPkg.default as any).SynchronizationListener) ||
-                                (MetaApi && (MetaApi as any).SynchronizationListener);
+      // If no perfect match is found by class name or prototype property, fallback to any function in the candidates
+      if (!MetaApi) {
+        for (const candidate of candidates) {
+          if (typeof candidate === "function") {
+            MetaApi = candidate;
+            break;
+          }
+        }
+      }
 
-      MetaStats = MetaApiPkg.MetaStats || 
-                  (MetaApiPkg.default && (MetaApiPkg.default as any).MetaStats) ||
-                  (MetaApi && (MetaApi as any).MetaStats);
+      if (typeof MetaApi !== "function") {
+        console.warn("[METAAPI WARNING] Auto-resolver failed to find a function. Attempting raw assignments...");
+        MetaApi = MetaApiPkg.default || MetaApiPkg;
+      }
 
-      MemoryHistoryStorage = MetaApiPkg.MemoryHistoryStorage || 
-                             (MetaApiPkg.default && (MetaApiPkg.default as any).MemoryHistoryStorage) ||
-                             (MetaApi && (MetaApi as any).MemoryHistoryStorage);
+      // 2. Resolve other package components supportively
+      const syncCandidates = [
+        MetaApiPkg.SynchronizationListener,
+        MetaApiPkg.default && MetaApiPkg.default.SynchronizationListener,
+        MetaApiPkg.default && MetaApiPkg.default.default && MetaApiPkg.default.default.SynchronizationListener,
+        MetaApi && (MetaApi as any).SynchronizationListener,
+        MetaApiPkg.default && (MetaApiPkg.default as any).SynchronizationListener
+      ];
+      for (const candidate of syncCandidates) {
+        if (candidate) {
+          SynchronizationListener = candidate;
+          break;
+        }
+      }
+
+      const statsCandidates = [
+        MetaApiPkg.MetaStats,
+        MetaApiPkg.default && MetaApiPkg.default.MetaStats,
+        MetaApiPkg.default && MetaApiPkg.default.default && MetaApiPkg.default.default.MetaStats,
+        MetaApi && (MetaApi as any).MetaStats,
+        MetaApiPkg.default && (MetaApiPkg.default as any).MetaStats
+      ];
+      for (const candidate of statsCandidates) {
+        if (candidate) {
+          MetaStats = candidate;
+          break;
+        }
+      }
+
+      const storageCandidates = [
+        MetaApiPkg.MemoryHistoryStorage,
+        MetaApiPkg.default && MetaApiPkg.default.MemoryHistoryStorage,
+        MetaApiPkg.default && MetaApiPkg.default.default && MetaApiPkg.default.default.MemoryHistoryStorage,
+        MetaApi && (MetaApi as any).MemoryHistoryStorage,
+        MetaApiPkg.default && (MetaApiPkg.default as any).MemoryHistoryStorage
+      ];
+      for (const candidate of storageCandidates) {
+        if (candidate) {
+          MemoryHistoryStorage = candidate;
+          break;
+        }
+      }
       
       console.log("[METAAPI] Dynamically loaded MetaApi package components successfully. Type of MetaApi:", typeof MetaApi);
+      if (typeof MetaApi !== "function") {
+        throw new Error("Resolved MetaApi is not a constructor/function. Please check your module resolution.");
+      }
     }
     isMetaApiLoaded = true;
   } catch (err: any) {
