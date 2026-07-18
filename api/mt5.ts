@@ -16,18 +16,35 @@ async function ensureMetaApiLoaded() {
     const pkgName = "metaapi.cloud-sdk" + "/node";
     const MetaApiPkg = await import(pkgName) as any;
     if (MetaApiPkg) {
-      MetaApi = MetaApiPkg.default || MetaApiPkg;
-      if (typeof MetaApi !== "function" && MetaApiPkg.default) {
-        MetaApi = MetaApiPkg.default;
+      // Resolve MetaApi constructor supporting all possible module export formats
+      MetaApi = MetaApiPkg.MetaApi || 
+                (MetaApiPkg.default && MetaApiPkg.default.MetaApi) || 
+                MetaApiPkg.default || 
+                MetaApiPkg;
+
+      if (typeof MetaApi !== "function") {
+        console.warn("[METAAPI WARNING] Resolved MetaApi is not a constructor/function. Attempting fallbacks...");
+        if (MetaApiPkg.default && typeof MetaApiPkg.default === "function") {
+          MetaApi = MetaApiPkg.default;
+        } else if (typeof MetaApiPkg === "function") {
+          MetaApi = MetaApiPkg;
+        }
       }
+
+      // Resolve other package components supportively
       SynchronizationListener = MetaApiPkg.SynchronizationListener || 
-                                (MetaApiPkg.default && (MetaApiPkg.default as any).SynchronizationListener);
+                                (MetaApiPkg.default && (MetaApiPkg.default as any).SynchronizationListener) ||
+                                (MetaApi && (MetaApi as any).SynchronizationListener);
+
       MetaStats = MetaApiPkg.MetaStats || 
-                  (MetaApiPkg.default && (MetaApiPkg.default as any).MetaStats);
+                  (MetaApiPkg.default && (MetaApiPkg.default as any).MetaStats) ||
+                  (MetaApi && (MetaApi as any).MetaStats);
+
       MemoryHistoryStorage = MetaApiPkg.MemoryHistoryStorage || 
-                             (MetaApiPkg.default && (MetaApiPkg.default as any).MemoryHistoryStorage);
+                             (MetaApiPkg.default && (MetaApiPkg.default as any).MemoryHistoryStorage) ||
+                             (MetaApi && (MetaApi as any).MemoryHistoryStorage);
       
-      console.log("[METAAPI] Dynamically loaded MetaApi package components successfully.");
+      console.log("[METAAPI] Dynamically loaded MetaApi package components successfully. Type of MetaApi:", typeof MetaApi);
     }
     isMetaApiLoaded = true;
   } catch (err: any) {
