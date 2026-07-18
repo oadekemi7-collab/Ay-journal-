@@ -106,116 +106,20 @@ export function handleFirestoreError(error: any, operationType: OperationType, p
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Fallback and shadow persistent caches in Local Storage
-function getLocalTrades(email: string): Trade[] {
-  try {
-    const raw = localStorage.getItem(`journaly_trades_${email.toLowerCase().trim()}`);
-    return raw ? JSON.parse(raw) : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-function saveLocalTrades(email: string, trades: Trade[]) {
-  try {
-    localStorage.setItem(`journaly_trades_${email.toLowerCase().trim()}`, JSON.stringify(trades));
-  } catch (e) {
-    console.error('Error saving local trades:', e);
-  }
-}
-
-function getLocalProfile(email: string): any {
-  try {
-    const raw = localStorage.getItem(`journaly_profile_${email.toLowerCase().trim()}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-function saveLocalProfile(email: string, profile: any) {
-  try {
-    localStorage.setItem(`journaly_profile_${email.toLowerCase().trim()}`, JSON.stringify(profile));
-  } catch (e) {
-    console.error('Error saving local profile:', e);
-  }
-}
-
-function getLocalAllProfiles(): any[] {
-  try {
-    const raw = localStorage.getItem('journaly_all_profiles');
-    return raw ? JSON.parse(raw) : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-function saveLocalAllProfiles(profiles: any[]) {
-  try {
-    localStorage.setItem('journaly_all_profiles', JSON.stringify(profiles));
-  } catch (e) {
-    console.error('Error saving local all profiles:', e);
-  }
-}
-
-function mergeTrades(local: Trade[], remote: Trade[]): Trade[] {
-  const map = new Map<string, Trade>();
-  local.forEach(t => map.set(t.id, t));
-  remote.forEach(t => map.set(t.id, t));
-  return Array.from(map.values()).sort((a, b) => {
-    return new Date(b.date).getTime() - new Date(a.date).getTime();
-  });
-}
-
-// In-memory subscription registries to support reactive local updates when Firestore writes fail
-const tradesCallbacks = new Map<string, Set<(trades: Trade[]) => void>>();
-const profileCallbacks = new Map<string, Set<(profile: any) => void>>();
-
-function notifyTradesSubscribers(email: string, trades: Trade[]) {
-  const emailKey = email.toLowerCase().trim();
-  const callbacks = tradesCallbacks.get(emailKey);
-  if (callbacks) {
-    callbacks.forEach(cb => {
-      try {
-        cb(trades);
-      } catch (err) {
-        console.error('Error in trade callback:', err);
-      }
-    });
-  }
-}
-
-function notifyProfileSubscribers(email: string, profile: any) {
-  const emailKey = email.toLowerCase().trim();
-  const callbacks = profileCallbacks.get(emailKey);
-  if (callbacks) {
-    callbacks.forEach(cb => {
-      try {
-        cb(profile);
-      } catch (err) {
-        console.error('Error in profile callback:', err);
-      }
-    });
-  }
-}
-
 // Helper: Fetch all trades for an email
 export async function getTradesForUser(email: string): Promise<Trade[]> {
-  const emailKey = email.toLowerCase().trim();
   const collectionPath = 'trades';
-  const local = getLocalTrades(emailKey);
-
   try {
     const q = query(
       collection(db, collectionPath),
-      where('email', '==', emailKey),
+      where('email', '==', email.toLowerCase()),
       orderBy('createdAt', 'desc')
     );
     const snapshot = await getDocs(q);
-    const remoteTrades: Trade[] = [];
+    const trades: Trade[] = [];
     snapshot.forEach((document) => {
       const data = document.data();
-      remoteTrades.push({
+      trades.push({
         id: document.id,
         pair: data.pair || '',
         type: data.type || 'BUY',
@@ -231,36 +135,23 @@ export async function getTradesForUser(email: string): Promise<Trade[]> {
         swap: data.swap !== undefined ? Number(data.swap) : undefined,
       });
     });
-
-    const merged = mergeTrades(local, remoteTrades);
-    saveLocalTrades(emailKey, merged);
-    return merged;
+    return trades;
   } catch (error: any) {
-    console.warn('Error fetching trades from Firestore (using local storage cache):', error);
-    return local;
+    if (error?.code === 'permission-denied' || error?.message?.includes('permission') || error?.message?.includes('Permission')) {
+      handleFirestoreError(error, OperationType.LIST, collectionPath);
+    }
+    console.error('Error fetching trades from Firestore:', error);
+    // Return empty array and fallback gracefully
+    return [];
   }
 }
 
 // Helper: Add or Update a single trade
 export async function saveTradeToFirestore(email: string, trade: Trade): Promise<void> {
-  const emailKey = email.toLowerCase().trim();
-  
-  // 1. Dual-write to local storage immediately
-  const local = getLocalTrades(emailKey);
-  const existingIndex = local.findIndex(t => t.id === trade.id);
-  if (existingIndex > -1) {
-    local[existingIndex] = trade;
-  } else {
-    local.unshift(trade);
-  }
-  saveLocalTrades(emailKey, local);
-  notifyTradesSubscribers(emailKey, local);
-
-  // 2. Try writing to Firestore
   const tradeRef = doc(db, 'trades', trade.id);
   try {
     await setDoc(tradeRef, {
-      email: emailKey,
+      email: email.toLowerCase(),
       pair: trade.pair,
       type: trade.type,
       risk: trade.risk,
@@ -276,37 +167,25 @@ export async function saveTradeToFirestore(email: string, trade: Trade): Promise
       createdAt: new Date(),
     });
   } catch (error: any) {
-    console.warn('[FIRESTORE WRITE NOTICE] Resource exhausted or write failed. Dual-write saved to browser storage fallback.', error);
+    if (error?.code === 'permission-denied' || error?.message?.includes('permission') || error?.message?.includes('Permission')) {
+      handleFirestoreError(error, OperationType.WRITE, `trades/${trade.id}`);
+    }
+    console.error('Error saving trade to Firestore:', error);
+    throw error;
   }
 }
 
 // Helper: Delete a trade
 export async function deleteTradeFromFirestore(tradeId: string): Promise<void> {
-  // 1. Remove from local storage immediately
-  let emailKey = '';
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key && key.startsWith('journaly_trades_')) {
-      try {
-        const trades: Trade[] = JSON.parse(localStorage.getItem(key) || '[]');
-        const idx = trades.findIndex(t => t.id === tradeId);
-        if (idx > -1) {
-          trades.splice(idx, 1);
-          localStorage.setItem(key, JSON.stringify(trades));
-          emailKey = key.replace('journaly_trades_', '');
-          notifyTradesSubscribers(emailKey, trades);
-          break;
-        }
-      } catch (e) {}
-    }
-  }
-
-  // 2. Try deleting from Firestore
+  const tradeRef = doc(db, 'trades', tradeId);
   try {
-    const tradeRef = doc(db, 'trades', tradeId);
     await deleteDoc(tradeRef);
   } catch (error: any) {
-    console.warn('Error deleting trade from Firestore, deleted locally:', error);
+    if (error?.code === 'permission-denied' || error?.message?.includes('permission') || error?.message?.includes('Permission')) {
+      handleFirestoreError(error, OperationType.DELETE, `trades/${tradeId}`);
+    }
+    console.error('Error deleting trade from Firestore:', error);
+    throw error;
   }
 }
 
@@ -319,42 +198,38 @@ export async function batchSaveTradesToFirestore(email: string, trades: Trade[])
 
 // Helper: Clear all trades for a user
 export async function clearAllUserTrades(email: string): Promise<void> {
-  const emailKey = email.toLowerCase().trim();
-  saveLocalTrades(emailKey, []);
-  notifyTradesSubscribers(emailKey, []);
-
   const collectionPath = 'trades';
   try {
     const q = query(
       collection(db, collectionPath),
-      where('email', '==', emailKey)
+      where('email', '==', email.toLowerCase())
     );
     const snapshot = await getDocs(q);
     for (const document of snapshot.docs) {
       try {
         await deleteDoc(document.ref);
       } catch (error: any) {
-        console.warn('Error deleting document during clear:', error);
+        if (error?.code === 'permission-denied' || error?.message?.includes('permission') || error?.message?.includes('Permission')) {
+          handleFirestoreError(error, OperationType.DELETE, `trades/${document.id}`);
+        }
+        throw error;
       }
     }
   } catch (error: any) {
-    console.warn('Error clearing trades in Firestore:', error);
+    if (error?.code === 'permission-denied' || error?.message?.includes('permission') || error?.message?.includes('Permission')) {
+      handleFirestoreError(error, OperationType.LIST, collectionPath);
+    }
+    console.error('Error clearing trades in Firestore:', error);
   }
 }
 
 // Helper: Clear only MT5-sourced synced trades for a user
 export async function clearMT5TradesForUser(email: string): Promise<void> {
-  const emailKey = email.toLowerCase().trim();
-  const local = getLocalTrades(emailKey);
-  const updated = local.filter(t => t.source !== 'mt5');
-  saveLocalTrades(emailKey, updated);
-  notifyTradesSubscribers(emailKey, updated);
-
   const collectionPath = 'trades';
   try {
     const q = query(
       collection(db, collectionPath),
-      where('email', '==', emailKey),
+      where('email', '==', email.toLowerCase()),
       where('source', '==', 'mt5')
     );
     const snapshot = await getDocs(q);
@@ -372,50 +247,37 @@ export async function clearMT5TradesForUser(email: string): Promise<void> {
 
 // Helper: Fetch user's profile starting balance
 export async function getUserStartingBalance(email: string): Promise<number | null> {
-  const emailKey = email.toLowerCase().trim();
-  const localProfile = getLocalProfile(emailKey);
-  if (localProfile && typeof localProfile.startingBalance === 'number') {
-    return localProfile.startingBalance;
-  }
-
+  const docPath = `profiles/${email.toLowerCase()}`;
   try {
-    const docRef = doc(db, 'profiles', emailKey);
+    const docRef = doc(db, 'profiles', email.toLowerCase());
     const docSnap = await getDoc(docRef);
     if (docSnap.exists()) {
       const data = docSnap.data();
       return typeof data.startingBalance === 'number' ? data.startingBalance : 0;
     }
   } catch (error: any) {
-    console.warn('Error getting starting balance from Firestore:', error);
+    if (error?.code === 'permission-denied' || error?.message?.includes('permission') || error?.message?.includes('Permission')) {
+      handleFirestoreError(error, OperationType.GET, docPath);
+    }
+    console.error('Error getting starting balance from Firestore:', error);
   }
-  return localProfile?.startingBalance ?? 0;
+  return null; // return null if not found
 }
 
 // Helper: Save user's starting balance
 export async function saveUserStartingBalance(email: string, balance: number): Promise<void> {
-  const emailKey = email.toLowerCase().trim();
-  
-  const localProfile = getLocalProfile(emailKey) || { email: emailKey };
-  localProfile.startingBalance = balance;
-  saveLocalProfile(emailKey, localProfile);
-
-  const localAll = getLocalAllProfiles();
-  const idx = localAll.findIndex(p => p.email === emailKey);
-  if (idx > -1) {
-    localAll[idx].startingBalance = balance;
-    saveLocalAllProfiles(localAll);
-  }
-
-  notifyProfileSubscribers(emailKey, localProfile);
-
+  const docPath = `profiles/${email.toLowerCase()}`;
   try {
-    const docRef = doc(db, 'profiles', emailKey);
+    const docRef = doc(db, 'profiles', email.toLowerCase());
     await setDoc(docRef, {
       startingBalance: balance,
       updatedAt: new Date()
     }, { merge: true });
   } catch (error: any) {
-    console.warn('Error saving starting balance to Firestore, saved locally:', error);
+    if (error?.code === 'permission-denied' || error?.message?.includes('permission') || error?.message?.includes('Permission')) {
+      handleFirestoreError(error, OperationType.WRITE, docPath);
+    }
+    console.error('Error saving starting balance to Firestore:', error);
   }
 }
 
@@ -438,6 +300,7 @@ export async function getAdminDiagnostics(): Promise<AdminDiagnosticsData> {
   const profilesMap = new Map<string, number>();
 
   try {
+    // 1. Fetch trades across ALL users in Firestore
     const tradesCol = collection(db, 'trades');
     const tradesSnapshot = await getDocs(tradesCol);
     
@@ -455,6 +318,7 @@ export async function getAdminDiagnostics(): Promise<AdminDiagnosticsData> {
       }
     });
 
+    // 2. Fetch profiles globally
     const profilesCol = collection(db, 'profiles');
     const profilesSnapshot = await getDocs(profilesCol);
     
@@ -472,12 +336,14 @@ export async function getAdminDiagnostics(): Promise<AdminDiagnosticsData> {
     console.error('Error during admin telemetry sync:', error);
   }
 
+  // Construct structured breakdown list
   const userBreakdown = Array.from(allEmails).map((email) => ({
     email,
     tradeCount: tradeCounts.get(email) || 0,
     startingBalance: profilesMap.get(email) ?? null
   })).sort((a, b) => b.tradeCount - a.tradeCount);
 
+  // Sort global pairs by occurrencefrequency 
   const globalPairs = Array.from(pairCounts.entries()).map(([pair, count]) => ({
     pair,
     count
@@ -506,35 +372,13 @@ export interface UserProfileData {
 
 // Sync user logging in via Google seamlessly
 export async function syncGoogleUser(email: string, name: string): Promise<void> {
-  const emailKey = email.toLowerCase().trim();
-
-  let localProfile = getLocalProfile(emailKey);
-  if (!localProfile) {
-    localProfile = {
-      email: emailKey,
-      name: name.trim(),
-      isVerified: true,
-      startingBalance: 0,
-      createdAt: new Date().toISOString(),
-      isGoogleAuth: true,
-      plan: (emailKey === 'toolaoilqbi@gmail.com' || emailKey === 'bigmira2003@gmail.com') ? 'premium' : 'free'
-    };
-    saveLocalProfile(emailKey, localProfile);
-    
-    const localAll = getLocalAllProfiles();
-    if (!localAll.some(p => p.email === emailKey)) {
-      localAll.push(localProfile);
-      saveLocalAllProfiles(localAll);
-    }
-  }
-
-  notifyProfileSubscribers(emailKey, localProfile);
-
+  const docPath = `profiles/${email.toLowerCase().trim()}`;
   try {
-    const docRef = doc(db, 'profiles', emailKey);
+    const docRef = doc(db, 'profiles', email.toLowerCase().trim());
     const docSnap = await getDoc(docRef);
     if (!docSnap.exists()) {
-      await clearAllUserTrades(emailKey);
+      // Clear any orphaned trades from older test runs under this shared account before starting clean
+      await clearAllUserTrades(email.toLowerCase().trim());
       await setDoc(docRef, {
         name: name.trim(),
         isVerified: true,
@@ -544,7 +388,10 @@ export async function syncGoogleUser(email: string, name: string): Promise<void>
       }, { merge: true });
     }
   } catch (error: any) {
-    console.warn('Error syncing Google user, saved locally:', error);
+    if (error?.code === 'permission-denied' || error?.message?.includes('permission')) {
+      handleFirestoreError(error, OperationType.WRITE, docPath);
+    }
+    console.error('Error syncing Google user:', error);
   }
 }
 
@@ -555,49 +402,29 @@ export async function authenticateUser(email: string, passwordAttempt: string): 
   user?: { email: string; name: string; avatar: string };
   needsVerification?: boolean;
 }> {
-  const emailKey = email.toLowerCase().trim();
-  const localAll = getLocalAllProfiles();
-  const localProfile = localAll.find(p => p.email === emailKey) || getLocalProfile(emailKey);
-
+  const docPath = `profiles/${email.toLowerCase().trim()}`;
   try {
-    const docRef = doc(db, 'profiles', emailKey);
+    const docRef = doc(db, 'profiles', email.toLowerCase().trim());
     const docSnap = await getDoc(docRef);
     
     if (!docSnap.exists()) {
-      if (localProfile) {
-        if (localProfile.password !== passwordAttempt) {
-          return { success: false, error: 'Incorrect password. Access denied.' };
-        }
-        const userPayload = {
-          email: emailKey,
-          name: localProfile.name || emailKey.split('@')[0],
-          avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${emailKey.split('@')[0]}&backgroundColor=10b981&textColor=09090b`
-        };
-        if (localProfile.isVerified === false) {
-          return { success: false, needsVerification: true, user: userPayload };
-        }
-        return { success: true, user: userPayload };
-      }
       return { success: false, error: 'No account found with this email. Please Sign Up.' };
     }
     
     const data = docSnap.data();
-    saveLocalProfile(emailKey, { email: emailKey, ...data });
-
-    const localAllUpdated = localAll.filter(p => p.email !== emailKey);
-    localAllUpdated.push({ email: emailKey, ...data });
-    saveLocalAllProfiles(localAllUpdated);
-
+    
+    // Check password
     if (data.password !== passwordAttempt) {
       return { success: false, error: 'Incorrect password. Access denied.' };
     }
     
     const userPayload = {
-      email: emailKey,
-      name: data.name || emailKey.split('@')[0],
-      avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${emailKey.split('@')[0]}&backgroundColor=10b981&textColor=09090b`
+      email: email.toLowerCase().trim(),
+      name: data.name || email.split('@')[0],
+      avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${email.split('@')[0]}&backgroundColor=10b981&textColor=09090b`
     };
 
+    // Check if verified
     if (data.isVerified === false) {
       return { 
         success: false, 
@@ -611,21 +438,7 @@ export async function authenticateUser(email: string, passwordAttempt: string): 
       user: userPayload
     };
   } catch (err: any) {
-    console.warn('Error authenticating user in Firestore (checking local cache):', err);
-    if (localProfile) {
-      if (localProfile.password !== passwordAttempt) {
-        return { success: false, error: 'Incorrect password. Access denied.' };
-      }
-      const userPayload = {
-        email: emailKey,
-        name: localProfile.name || emailKey.split('@')[0],
-        avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${emailKey.split('@')[0]}&backgroundColor=10b981&textColor=09090b`
-      };
-      if (localProfile.isVerified === false) {
-        return { success: false, needsVerification: true, user: userPayload };
-      }
-      return { success: true, user: userPayload };
-    }
+    console.error('Error authenticating user in Firestore:', err);
     return { success: false, error: 'Secure database communication error.' };
   }
 }
@@ -635,40 +448,18 @@ export async function registerUser(email: string, name: string, passwordAttempt:
   success: boolean;
   error?: string;
 }> {
-  const emailKey = email.toLowerCase().trim();
-  const localAll = getLocalAllProfiles();
-  const existingLocal = localAll.find(p => p.email === emailKey);
-  
-  if (existingLocal) {
-    return { success: false, error: 'Account already exists. Please Log In instead.' };
-  }
-
-  saveLocalTrades(emailKey, []);
-
-  const newProfile = {
-    email: emailKey,
-    name: name.trim(),
-    password: passwordAttempt,
-    verificationCode: verificationCode,
-    isVerified: false,
-    startingBalance: 0,
-    plan: 'free',
-    createdAt: new Date().toISOString()
-  };
-  saveLocalProfile(emailKey, newProfile);
-
-  localAll.push(newProfile);
-  saveLocalAllProfiles(localAll);
-  notifyProfileSubscribers(emailKey, newProfile);
-
+  const docPath = `profiles/${email.toLowerCase().trim()}`;
   try {
-    const docRef = doc(db, 'profiles', emailKey);
+    const docRef = doc(db, 'profiles', email.toLowerCase().trim());
     const docSnap = await getDoc(docRef);
+    
     if (docSnap.exists()) {
       return { success: false, error: 'Account already exists. Please Log In instead.' };
     }
     
-    await clearAllUserTrades(emailKey);
+    // Clear any orphaned trades from older test runs under this shared account before starting clean
+    await clearAllUserTrades(email.toLowerCase().trim());
+    
     await setDoc(docRef, {
       name: name.trim(),
       password: passwordAttempt,
@@ -680,47 +471,28 @@ export async function registerUser(email: string, name: string, passwordAttempt:
     
     return { success: true };
   } catch (err: any) {
-    console.warn('Error registering user in Firestore, continuing via local fallback:', err);
-    return { success: true };
+    console.error('Error registering user in Firestore:', err);
+    return { success: false, error: 'Database enrollment error.' };
   }
 }
 
-// Verify 6-digit confirmation code
+// Verify of 6-digit confirmation code
 export async function verifyUserCode(email: string, codeAttempt: string): Promise<{
   success: boolean;
   error?: string;
 }> {
-  const emailKey = email.toLowerCase().trim();
-  const localProfile = getLocalProfile(emailKey);
-
-  if (localProfile) {
-    if (String(localProfile.verificationCode).trim() !== String(codeAttempt).trim()) {
-      return { success: false, error: 'Invalid verification code. Please request a new one.' };
-    }
-    localProfile.isVerified = true;
-    saveLocalProfile(emailKey, localProfile);
-    
-    const localAll = getLocalAllProfiles();
-    const idx = localAll.findIndex(p => p.email === emailKey);
-    if (idx > -1) {
-      localAll[idx].isVerified = true;
-      saveLocalAllProfiles(localAll);
-    }
-    notifyProfileSubscribers(emailKey, localProfile);
-  }
-
+  const docPath = `profiles/${email.toLowerCase().trim()}`;
   try {
-    const docRef = doc(db, 'profiles', emailKey);
+    const docRef = doc(db, 'profiles', email.toLowerCase().trim());
     const docSnap = await getDoc(docRef);
     
     if (!docSnap.exists()) {
-      if (localProfile) return { success: true };
       return { success: false, error: 'Profile not found.' };
     }
     
     const data = docSnap.data();
     if (String(data.verificationCode).trim() !== String(codeAttempt).trim()) {
-      return { success: false, error: 'Invalid verification code.' };
+      return { success: false, error: 'Invalid verification code. Please request a new one or check the telemetry dashboard.' };
     }
     
     await setDoc(docRef, {
@@ -729,82 +501,49 @@ export async function verifyUserCode(email: string, codeAttempt: string): Promis
     
     return { success: true };
   } catch (err: any) {
-    console.warn('Error verifying user code in Firestore, proceeding with local success:', err);
-    if (localProfile) {
-      return { success: true };
-    }
+    console.error('Error verifying user verification code:', err);
     return { success: false, error: 'Database verification update failed.' };
   }
 }
 
 // Fetch complete user profile from Firestore
 export async function getUserProfile(email: string): Promise<any> {
-  const emailKey = email.toLowerCase().trim();
-  const localProfile = getLocalProfile(emailKey);
-
+  const docRef = doc(db, 'profiles', email.toLowerCase().trim());
   try {
-    const docRef = doc(db, 'profiles', emailKey);
     const docSnap = await getDoc(docRef);
     if (docSnap.exists()) {
-      const data = docSnap.data();
-      saveLocalProfile(emailKey, data);
-      return data;
+      return docSnap.data();
     }
   } catch (err) {
-    console.warn('Error fetching user profile, using local cache:', err);
+    console.error('Error fetching user profile:', err);
   }
-  return localProfile;
+  return null;
 }
 
 // Update user profile in Firestore
 export async function updateUserProfile(email: string, data: any): Promise<void> {
-  const emailKey = email.toLowerCase().trim();
-  const localProfile = getLocalProfile(emailKey) || { email: emailKey };
-  const updatedProfile = { ...localProfile, ...data };
-  saveLocalProfile(emailKey, updatedProfile);
-
-  const localAll = getLocalAllProfiles();
-  const idx = localAll.findIndex(p => p.email === emailKey);
-  if (idx > -1) {
-    localAll[idx] = { ...localAll[idx], ...data };
-    saveLocalAllProfiles(localAll);
-  }
-
-  notifyProfileSubscribers(emailKey, updatedProfile);
-
+  const docRef = doc(db, 'profiles', email.toLowerCase().trim());
   try {
-    const docRef = doc(db, 'profiles', emailKey);
     await setDoc(docRef, data, { merge: true });
   } catch (err) {
-    console.warn('Error updating user profile in Firestore, updated locally:', err);
+    console.error('Error updating user profile:', err);
   }
 }
 
 // Subscribe to trades in real-time
 export function subscribeToTradesForUser(email: string, callback: (trades: Trade[]) => void): () => void {
-  const emailKey = email.toLowerCase().trim();
-  
-  if (!tradesCallbacks.has(emailKey)) {
-    tradesCallbacks.set(emailKey, new Set());
-  }
-  tradesCallbacks.get(emailKey)!.add(callback);
-
-  // Emit cached local trades immediately
-  const localTrades = getLocalTrades(emailKey);
-  callback(localTrades);
-
   const collectionPath = 'trades';
   const q = query(
     collection(db, collectionPath),
-    where('email', '==', emailKey),
+    where('email', '==', email.toLowerCase()),
     orderBy('createdAt', 'desc')
   );
   
-  const unsubscribeFirestore = onSnapshot(q, (snapshot) => {
-    const firestoreTrades: Trade[] = [];
+  return onSnapshot(q, (snapshot) => {
+    const trades: Trade[] = [];
     snapshot.forEach((document) => {
       const data = document.data();
-      firestoreTrades.push({
+      trades.push({
         id: document.id,
         pair: data.pair || '',
         type: data.type || 'BUY',
@@ -820,63 +559,27 @@ export function subscribeToTradesForUser(email: string, callback: (trades: Trade
         swap: data.swap !== undefined ? Number(data.swap) : undefined,
       });
     });
-
-    const merged = mergeTrades(getLocalTrades(emailKey), firestoreTrades);
-    saveLocalTrades(emailKey, merged);
-    notifyTradesSubscribers(emailKey, merged);
+    callback(trades);
   }, (error) => {
-    console.warn('Firestore trades subscription error, continuing with local storage:', error);
-    callback(getLocalTrades(emailKey));
-  });
-
-  return () => {
-    const subs = tradesCallbacks.get(emailKey);
-    if (subs) {
-      subs.delete(callback);
-      if (subs.size === 0) {
-        tradesCallbacks.delete(emailKey);
-      }
+    console.error('Error in onSnapshot for trades:', error);
+    if (error?.code === 'permission-denied' || error?.message?.includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, collectionPath);
     }
-    unsubscribeFirestore();
-  };
+  });
 }
 
 // Subscribe to user profile in real-time
 export function subscribeToUserProfile(email: string, callback: (profile: any) => void): () => void {
-  const emailKey = email.toLowerCase().trim();
-
-  if (!profileCallbacks.has(emailKey)) {
-    profileCallbacks.set(emailKey, new Set());
-  }
-  profileCallbacks.get(emailKey)!.add(callback);
-
-  const localProfile = getLocalProfile(emailKey);
-  if (localProfile) {
-    callback(localProfile);
-  }
-
-  const docRef = doc(db, 'profiles', emailKey);
-  const unsubscribeFirestore = onSnapshot(docRef, (docSnap) => {
+  const docRef = doc(db, 'profiles', email.toLowerCase().trim());
+  return onSnapshot(docRef, (docSnap) => {
     if (docSnap.exists()) {
-      const data = docSnap.data();
-      saveLocalProfile(emailKey, data);
-      notifyProfileSubscribers(emailKey, data);
+      callback(docSnap.data());
+    } else {
+      callback(null);
     }
   }, (error) => {
-    console.warn('Firestore profile subscription error, continuing with local storage:', error);
-    callback(getLocalProfile(emailKey));
+    console.error('Error in onSnapshot for profile:', error);
   });
-
-  return () => {
-    const subs = profileCallbacks.get(emailKey);
-    if (subs) {
-      subs.delete(callback);
-      if (subs.size === 0) {
-        profileCallbacks.delete(emailKey);
-      }
-    }
-    unsubscribeFirestore();
-  };
 }
 
 

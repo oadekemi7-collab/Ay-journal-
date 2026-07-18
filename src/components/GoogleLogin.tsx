@@ -41,18 +41,13 @@ export default function GoogleLogin({ onSuccess }: GoogleLoginProps) {
   const [isVerifyingState, setIsVerifyingState] = useState<boolean>(false);
   const [emailPreviewUrl, setEmailPreviewUrl] = useState<string>('');
   const [showSmtpGuide, setShowSmtpGuide] = useState<boolean>(false);
-  const [deliveryError, setDeliveryError] = useState<string>('');
 
   const sendVerificationCodeEmail = async (email: string, code: string, type: 'auth' | 'reset' = 'auth') => {
-    // Log the code prominently in browser console for local testing / bypass convenience
-    console.log(`%c[JOURNALY SECURE VERIFICATION] Code for ${email}: ${code}`, 'background: #10b981; color: #09090b; font-size: 14px; font-weight: bold; padding: 4px 8px; border-radius: 4px;');
-    
     try {
       setEmailPreviewUrl('');
-      setDeliveryError('');
-
-      // Quiet log to help developer if needed, but not showing anywhere on screen
-      console.log(`[Email Dispatcher] Dispatching code to email ${email} via server API (type: ${type})...`);
+      // Debug log directly to client console so standard user can copy paste if they haven't set up SMTP yet
+      console.log(`%c[SYSTEM ACCESS PIN] Code: ${code} for ${email} (type: ${type})`, 'background: #064e3b; color: #34d399; font-weight: bold; font-size: 14px; padding: 4px 8px; border-radius: 4px;');
+      console.log(`[Email Dispatcher] Dispatching code ${code} to email ${email} via server API (type: ${type})...`);
       const response = await fetch('/api/send-code', {
         method: 'POST',
         headers: {
@@ -73,11 +68,9 @@ export default function GoogleLogin({ onSuccess }: GoogleLoginProps) {
         }
       } else {
         console.error('[Email Dispatcher] Server failed to dispatch:', data.error);
-        setDeliveryError(data.error || 'SMTP authentication failed.');
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('[Email Dispatcher] Failed to dispatch verification code:', err);
-      setDeliveryError(err.message || 'Network transport failure.');
     }
   };
 
@@ -410,51 +403,24 @@ export default function GoogleLogin({ onSuccess }: GoogleLoginProps) {
                 Confirm Code
               </h2>
             </div>
+
             {/* Real-time Secure Email Verification alert block */}
             <div className="p-4 bg-emerald-500/5 border border-emerald-500/15 text-emerald-400 rounded-xl mb-4 text-[11.5px] leading-relaxed">
               <span className="font-extrabold flex items-center gap-1.5 mb-2 text-[10px] uppercase tracking-wider text-emerald-300 animate-pulse">
                 <Sparkles size={11} className="inline shrink-0 text-emerald-400" />
-                Verification Email Routed
+                Verification Email Dispatched
               </span>
               <p className="mb-2 text-zinc-300">
-                A secure confirmation key was sent to: <span className="font-bold text-white">{pendingEmail}</span>
+                A secure 6-digit confirmation key has been dispatched to your private address: <span className="font-bold text-white">{pendingEmail}</span>
               </p>
-              
-              <div className="mt-3 pt-3 border-t border-emerald-500/15">
-                <p className="text-emerald-300 font-bold mb-1 flex items-center gap-1.5 text-[11px]">
-                  💡 No Google App Password setup yet?
-                </p>
-                <p className="text-zinc-400 text-[10.5px] leading-relaxed mb-2.5">
-                  Since you are in preview testing, you can bypass the email delivery completely and use this secure sandbox code:
-                </p>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 bg-emerald-500/10 border border-emerald-500/20 text-center py-2 rounded-lg font-mono text-xs font-black tracking-widest text-emerald-300 select-all">
-                    {generatedCode}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setVerificationInput(generatedCode);
-                      setVerificationError('');
-                    }}
-                    className="px-3 py-2 bg-emerald-500 text-zinc-950 font-bold text-[10px] uppercase tracking-wider rounded-lg hover:bg-emerald-400 transition-all cursor-pointer active:scale-95"
-                  >
-                    Auto-Fill
-                  </button>
-                </div>
-              </div>
+              <p className="text-zinc-400 text-[11px] leading-relaxed">
+                Please check your inbox, spam, or promotions folders for the email containing your code. Enter the code below to finalize your session.
+              </p>
             </div>
 
-            {deliveryError && (
-              <div className="p-3 bg-amber-500/5 border border-amber-500/15 text-amber-400 rounded-xl mb-4 text-[11px] leading-relaxed">
-                <span className="font-bold text-amber-300 text-[9.5px] uppercase tracking-wider">
-                  ⚠️ SMTP Notice (Optional for production setup)
-                </span>
-                <p className="text-zinc-400 text-[10.5px] mt-1">
-                  Primary SMTP server failed: <code className="text-rose-400 font-mono text-[9.5px]">{deliveryError}</code>. This only affects automatic email sending.
-                </p>
-              </div>
-            )}
+            <p className="text-xs text-zinc-400 mb-4 leading-relaxed">
+              Please enter the code sent to your email address to activate your Journaly workspace sync.
+            </p>
 
             <form onSubmit={handleVerifyCodeSubmit} className="space-y-4">
               {verificationError && (
@@ -504,12 +470,12 @@ export default function GoogleLogin({ onSuccess }: GoogleLoginProps) {
                     <li><strong className="text-zinc-200">SMTP_HOST</strong>: <code className="text-emerald-400 font-mono text-[9.5px]">smtp.gmail.com</code></li>
                     <li><strong className="text-zinc-200">SMTP_PORT</strong>: <code className="text-emerald-400 font-mono text-[9.5px]">587</code></li>
                     <li><strong className="text-zinc-200">SMTP_USER</strong>: Your Gmail address (e.g., <code className="text-zinc-350 font-mono text-[9.5px]">{pendingEmail || 'your_email@gmail.com'}</code>)</li>
-                    <li><strong className="text-zinc-200">SMTP_PASS</strong>: Your <strong className="text-emerald-450 text-emerald-400">Google App Password</strong> (not your core login password. Setup one instantly in <em className="text-zinc-300">Google Account → Security → 2-Step Verification → App Passwords</em>)</li>
+                    <li><strong className="text-zinc-200">SMTP_PASS</strong>: Your <strong className="text-emerald-450 text-emerald-400">Google App Password</strong> (not your core login password. Setup one instantly in <em className="text-zinc-300">Google Account &rarr; Security &rarr; 2-Step Verification &rarr; App Passwords</em>)</li>
                     <li><strong className="text-zinc-200">SMTP_FROM_EMAIL</strong>: Your Gmail address</li>
                     <li><strong className="text-zinc-200">SMTP_FROM_NAME</strong>: <code className="text-zinc-350 font-mono text-[9.5px]">Journaly</code></li>
                   </ul>
                   <p className="text-[10px] text-zinc-500 border-t border-zinc-900/60 pt-2">
-                    💡 <strong className="text-zinc-400">Immediate Local Bypass:</strong> You can also bypass waiting for email setup by looking at your browser console! open DevTools (<strong className="text-zinc-300 font-bold">F12</strong> or Right-click → <strong className="text-zinc-300 font-bold">Inspect → Console</strong>) where the code is securely logged for your local testing convenience.
+                    💡 <strong className="text-zinc-400">Immediate Local Bypass:</strong> You can also bypass waiting for email setup by looking at your browser console! open DevTools (<strong className="text-zinc-300 font-bold">F12</strong> or Right-click &rarr; <strong className="text-zinc-300 font-bold">Inspect &rarr; Console</strong>) where the code is securely logged for your local testing convenience.
                   </p>
                 </div>
               )}
@@ -521,9 +487,9 @@ export default function GoogleLogin({ onSuccess }: GoogleLoginProps) {
                 setVerificationInput('');
                 setVerificationError('');
               }}
-              className="mt-6 text-[11px] font-bold text-zinc-500 hover:text-zinc-400 transition-colors self-center py-1 cursor-pointer flex items-center gap-1 bg-transparent border-none"
+              className="mt-6 text-[11px] font-bold text-zinc-500 hover:text-zinc-400 transition-colors self-center py-1 cursor-pointer"
             >
-              <ArrowLeft size={11} /> Back to Log In
+              &larr; Back to Log In
             </button>
           </div>
         )}
@@ -577,9 +543,9 @@ export default function GoogleLogin({ onSuccess }: GoogleLoginProps) {
 
             <button
               onClick={() => setStep('intro')}
-              className="mt-8 text-[11px] font-bold text-zinc-500 hover:text-zinc-400 transition-colors self-center py-1 cursor-pointer flex items-center gap-1 bg-transparent border-none"
+              className="mt-8 text-[11px] font-bold text-zinc-500 hover:text-zinc-400 transition-colors self-center py-1 cursor-pointer"
             >
-              <ArrowLeft size={11} /> Back to login intro
+              &larr; Back to login intro
             </button>
           </div>
         )}
@@ -697,42 +663,10 @@ export default function GoogleLogin({ onSuccess }: GoogleLoginProps) {
               <p className="mb-2 text-zinc-200">
                 We've routed a 6-digit verification code to: <br/><strong className="text-white font-mono">{pendingEmail}</strong>
               </p>
-              
-              <div className="mt-3 pt-3 border-t border-emerald-500/15">
-                <p className="text-emerald-300 font-bold mb-1 flex items-center gap-1.5 text-[11px]">
-                  💡 No Google App Password setup yet?
-                </p>
-                <p className="text-zinc-400 text-[10.5px] leading-relaxed mb-2.5">
-                  Since you are in preview testing, you can bypass the email delivery completely and use this secure sandbox code:
-                </p>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 bg-emerald-500/10 border border-emerald-500/20 text-center py-2 rounded-lg font-mono text-xs font-black tracking-widest text-emerald-300 select-all">
-                    {generatedCode}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setVerificationInput(generatedCode);
-                      setVerificationError('');
-                    }}
-                    className="px-3 py-2 bg-emerald-500 text-zinc-950 font-bold text-[10px] uppercase tracking-wider rounded-lg hover:bg-emerald-400 transition-all cursor-pointer active:scale-95"
-                  >
-                    Auto-Fill
-                  </button>
-                </div>
-              </div>
+              <p className="text-zinc-400 text-[10.5px]">
+                Check your primary inbox or spam folder. Enter the code below.
+              </p>
             </div>
-
-            {deliveryError && (
-              <div className="p-3 bg-amber-500/5 border border-amber-500/15 text-amber-400 rounded-xl mb-4 text-[11px] leading-relaxed">
-                <span className="font-bold text-amber-300 text-[9.5px] uppercase tracking-wider">
-                  ⚠️ SMTP Notice (Optional for production setup)
-                </span>
-                <p className="text-zinc-400 text-[10.5px] mt-1">
-                  Primary SMTP server failed: <code className="text-rose-400 font-mono text-[9.5px]">{deliveryError}</code>. This only affects automatic email sending.
-                </p>
-              </div>
-            )}
 
             <form onSubmit={async (e) => {
               e.preventDefault();
@@ -899,16 +833,6 @@ export default function GoogleLogin({ onSuccess }: GoogleLoginProps) {
                 <span>{isResetLoading ? 'Updating credentials...' : 'Reset Password & Log In'}</span>
               </button>
             </form>
-
-            <button
-              onClick={() => {
-                setStep('verify_reset');
-                setForgotError('');
-              }}
-              className="mt-6 text-[11px] font-bold text-zinc-500 hover:text-zinc-400 transition-colors self-center py-1 cursor-pointer flex items-center gap-1 bg-transparent border-none"
-            >
-              <ArrowLeft size={11} /> Back to Verify Reset Code
-            </button>
           </div>
         )}
 

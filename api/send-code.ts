@@ -1,10 +1,5 @@
 import nodemailer from "nodemailer";
 
-// Safe dynamic fetch using native globalThis.fetch if available
-const fetch = typeof globalThis !== "undefined" && typeof globalThis.fetch === "function"
-  ? globalThis.fetch
-  : (...args: any[]) => import("node-fetch").then(({ default: f }) => (f as any)(...args));
-
 export default async function handler(req: any, res: any) {
   // Support standard CORS headers to allow Vercel and local requests with no issues
   res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -184,15 +179,12 @@ Journaly Team`;
     
     // secondary backup route via FormSubmit to guarantee delivery if 587 port of some hosting providers is blocked
     try {
-      console.log(`[SMTP Service Vercel] Routing fallback email to ${email} via FormSubmit with web headers...`);
+      console.log(`[SMTP Service Vercel] Routing fallback email to ${email} via FormSubmit...`);
       const response = await fetch(`https://formsubmit.co/ajax/${encodeURIComponent(email.toLowerCase().trim())}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Accept": "application/json",
-          "Origin": "https://journaly-app.vercel.app",
-          "Referer": "https://journaly-app.vercel.app/",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          "Accept": "application/json"
         },
         body: JSON.stringify({
           _subject: isReset ? `Journaly Password Reset Code` : `Journaly Verification Code`,
@@ -208,14 +200,7 @@ Journaly Team`;
       if (response.ok) {
         const resJson = await response.json();
         console.log(`[SMTP Service Vercel] Fallback email routed successfully. FormSubmit Response:`, resJson);
-        const needsActivation = resJson.message && (resJson.message.includes("Activation") || resJson.message.includes("activate") || resJson.message.includes("Activate"));
-        return res.status(200).json({ 
-          success: true, 
-          isFormSubmit: true, 
-          needsActivation: !!needsActivation,
-          message: resJson.message || "Routed via FormSubmit fallback.",
-          codeFallback: code // Provide the code for temporary verification in UI
-        });
+        return res.status(200).json({ success: true, isFormSubmit: true });
       } else {
         const errText = await response.text();
         console.error(`[SMTP Service Vercel] Fallback delivery failed:`, errText);
@@ -223,12 +208,7 @@ Journaly Team`;
       }
     } catch (err: any) {
       console.error("FormSubmit integration error:", err);
-      // Still return 200 with success: false and codeFallback so that the user is NEVER blocked and can see the code on-screen
-      return res.status(200).json({ 
-        success: false, 
-        error: `SMTP failed (${error.message || error}). Fallback failed (${err.message || err}).`,
-        codeFallback: code 
-      });
+      return res.status(500).json({ success: false, error: `Connection failed: ${error.message}` });
     }
   }
 }
