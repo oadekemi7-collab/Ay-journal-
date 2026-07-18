@@ -298,14 +298,14 @@ export default function App() {
     }
 
     // Direct developer override
-    if (user.email.toLowerCase() === 'toolaoilqbi@gmail.com') {
+    if (user.email.toLowerCase() === 'toolaoilqbi@gmail.com' || user.email.toLowerCase() === 'bigmira2003@gmail.com') {
       setUserPlan('premium');
     }
 
     // Subscribe in real-time to profile details
     const unsubscribe = subscribeToUserProfile(user.email, (profile) => {
       if (profile) {
-        if (user.email.toLowerCase() === 'toolaoilqbi@gmail.com') {
+        if (user.email.toLowerCase() === 'toolaoilqbi@gmail.com' || user.email.toLowerCase() === 'bigmira2003@gmail.com') {
           setUserPlan('premium');
         } else {
           setUserPlan(profile.plan === 'premium' ? 'premium' : 'free');
@@ -317,7 +317,7 @@ export default function App() {
         setMt5Equity(profile.mt5Equity ?? null);
       } else {
         // Create dynamic profile if it doesn't exist yet
-        if (user.email.toLowerCase() === 'toolaoilqbi@gmail.com') {
+        if (user.email.toLowerCase() === 'toolaoilqbi@gmail.com' || user.email.toLowerCase() === 'bigmira2003@gmail.com') {
           setUserPlan('premium');
           updateUserProfile(user.email, { plan: 'premium' });
         } else {
@@ -791,8 +791,8 @@ export default function App() {
               </div>
             )}
 
-            {/* Admin Diagnostics button - ONLY for toolaoilqbi@gmail.com */}
-            {user?.email.toLowerCase() === 'toolaoilqbi@gmail.com' && (
+            {/* Admin Diagnostics button - ONLY for toolaoilqbi@gmail.com & bigmira2003@gmail.com */}
+            {(user?.email.toLowerCase() === 'toolaoilqbi@gmail.com' || user?.email.toLowerCase() === 'bigmira2003@gmail.com') && (
               <button
                 onClick={handleOpenAdminPanel}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-450 text-zinc-950 font-bold rounded-xl transition-all duration-150 shadow-md shadow-emerald-500/10 cursor-pointer text-[11px] select-none h-[32px] shrink-0"

@@ -212,7 +212,7 @@ export default function AdminDiagnostics({ onClose, data, isLoading }: AdminDiag
                             <span className="truncate max-w-[180px] sm:max-w-xs block" title={u.email}>
                               {u.email}
                             </span>
-                            {u.email === 'toolaoilqbi@gmail.com' && (
+                            {(u.email === 'toolaoilqbi@gmail.com' || u.email === 'bigmira2003@gmail.com') && (
                               <span className="text-[8px] bg-emerald-950 text-emerald-400 border border-emerald-900/40 px-1 py-0.2 rounded font-bold shrink-0">
                                 OWNER
                               </span>

@@ -517,7 +517,7 @@ export async function syncGoogleUser(email: string, name: string): Promise<void>
       startingBalance: 0,
       createdAt: new Date().toISOString(),
       isGoogleAuth: true,
-      plan: emailKey === 'toolaoilqbi@gmail.com' ? 'premium' : 'free'
+      plan: (emailKey === 'toolaoilqbi@gmail.com' || emailKey === 'bigmira2003@gmail.com') ? 'premium' : 'free'
     };
     saveLocalProfile(emailKey, localProfile);
     
