@@ -14,17 +14,18 @@ import {
 } from 'firebase/firestore';
 import { Trade } from '../types';
 
-const metaEnv = (typeof import.meta !== 'undefined' && (import.meta as any).env) 
-  ? (import.meta as any).env 
-  : (typeof process !== 'undefined' && process.env ? process.env : {});
-
 const getEnvVal = (key: string): string | undefined => {
-  if (metaEnv[key]) return metaEnv[key];
-  if (metaEnv[`VITE_${key}`]) return metaEnv[`VITE_${key}`];
   if (typeof process !== 'undefined' && process.env) {
     if (process.env[key]) return process.env[key];
     if (process.env[`VITE_${key}`]) return process.env[`VITE_${key}`];
   }
+  try {
+    const metaEnv = (import.meta as any).env;
+    if (metaEnv) {
+      if (metaEnv[key]) return metaEnv[key];
+      if (metaEnv[`VITE_${key}`]) return metaEnv[`VITE_${key}`];
+    }
+  } catch (e) {}
   return undefined;
 };
 

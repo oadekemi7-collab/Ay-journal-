@@ -3,7 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import sendCodeHandler from "./api/send-code.ts";
-import { handleGetConfig, handleConnectAccount, handleSyncAccount, handleConnectMT5, handleStatusAccount } from "./api/mt5.ts";
+import { handleGetConfig, handleConnectAccount, handleSyncAccount, handleConnectMT5, handleStatusAccount, handleConnectMockSandbox } from "./api/mt5.ts";
 import { handleInitializePaystack, handleVerifyPaystack } from "./api/paystack.ts";
 
 dotenv.config();
@@ -22,6 +22,8 @@ app.get("/api/mt5/config", handleGetConfig);
 app.post("/api/mt5/connect", handleConnectAccount);
 app.post("/api/mt5/sync", handleSyncAccount);
 app.post("/api/mt5/status", handleStatusAccount);
+app.post("/api/mt5/sandbox", handleConnectMockSandbox);
+app.post("/api/mt5/connect-mock", handleConnectMockSandbox);
 
 // Paystack secure subscription checkout endpoints
 app.post("/api/paystack/initialize", handleInitializePaystack);

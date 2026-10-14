@@ -334,10 +334,14 @@ export default function App() {
     if (!user || !mt5AccountId) return;
     if (!silent) setMt5Syncing(true);
     try {
+      const customMetaApiToken = localStorage.getItem("journaly_custom_metaapi_token");
       const response = await fetch('/api/mt5/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId: mt5AccountId })
+        body: JSON.stringify({ 
+          accountId: mt5AccountId,
+          ...(customMetaApiToken ? { metaApiToken: customMetaApiToken } : {})
+        })
       });
       const data = await response.json();
       if (data.success) {

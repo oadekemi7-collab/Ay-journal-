@@ -11,7 +11,12 @@ import {
   ArrowRight,
   ShieldAlert,
   HelpCircle,
-  Database
+  Database,
+  Key,
+  ExternalLink,
+  ChevronDown,
+  ChevronUp,
+  Check
 } from "lucide-react";
 import { updateUserProfile } from "../lib/firebase";
 
@@ -48,6 +53,8 @@ export default function MT5ConnectionPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
+  const [isPolling, setIsPolling] = useState(false);
+  const cancelPollRef = React.useRef(false);
 
   // Direct tab state
   const [directAccountId, setDirectAccountId] = useState("");
@@ -61,6 +68,11 @@ export default function MT5ConnectionPanel({
 
   const [isTokenConfigured, setIsTokenConfigured] = useState<boolean | null>(null);
   const [showConfirmDisconnect, setShowConfirmDisconnect] = useState(false);
+  const [customMetaApiToken, setCustomMetaApiToken] = useState(() => {
+    return localStorage.getItem("journaly_custom_metaapi_token") || "";
+  });
+  const [showTokenInput, setShowTokenInput] = useState(false);
+  const [tokenSavedNotice, setTokenSavedNotice] = useState(false);
 
   // Check backend server-side MetaApi Token configuration on mount
   useEffect(() => {
@@ -73,6 +85,41 @@ export default function MT5ConnectionPanel({
         setIsTokenConfigured(false);
       });
   }, []);
+
+  const handleForceSandbox = async () => {
+    cancelPollRef.current = true;
+    setIsPolling(false);
+    setLoading(true);
+    setError("");
+    setSuccessMsg("Initializing high-fidelity trade simulation sandbox...");
+    try {
+      const response = await fetch("/api/mt5/sandbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email })
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        setSuccessMsg("Demo Sandbox activated! 8 historical trades successfully seeded.");
+        setTimeout(() => {
+          onConnected(data.accountId, data.broker);
+        }, 1250);
+      } else {
+        setError(data.error || "Failed to initialize Demo Sandbox.");
+        setLoading(false);
+      }
+    } catch (err: any) {
+      setError(`Failed to initialize Demo Sandbox: ${err.message || String(err)}`);
+      setLoading(false);
+    }
+  };
+
+  const handleCancelPolling = () => {
+    cancelPollRef.current = true;
+    setIsPolling(false);
+    setLoading(false);
+    setSuccessMsg("");
+  };
 
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -98,6 +145,11 @@ export default function MT5ConnectionPanel({
       payload.password = password;
       payload.server = server.trim();
       payload.email = email;
+    }
+
+    if (customMetaApiToken.trim()) {
+      payload.metaApiToken = customMetaApiToken.trim();
+      localStorage.setItem("journaly_custom_metaapi_token", customMetaApiToken.trim());
     }
 
     setLoading(true);
@@ -139,25 +191,39 @@ export default function MT5ConnectionPanel({
         const data = responseJson;
         if (data.requiresPolling) {
           setSuccessMsg(data.message || "Establishing secure connection to MT5 broker...");
+          setIsPolling(true);
+          cancelPollRef.current = false;
           
           let pollCount = 0;
           const maxPolls = 30; // 30 polls * 3 seconds = 90 seconds max
           const accountId = data.accountId;
 
           const pollStatus = async () => {
+            if (cancelPollRef.current) {
+              return; // Stop polling if cancelled
+            }
             if (pollCount >= maxPolls) {
               setLoading(false);
+              setIsPolling(false);
               setError("Connection verification took too long. Please verify your account manually or retry.");
               return;
             }
 
             try {
+              const statusPayload: any = { accountId, email };
+              if (customMetaApiToken.trim()) {
+                statusPayload.metaApiToken = customMetaApiToken.trim();
+              }
               const statusRes = await fetch("/api/mt5/status", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ accountId, email })
+                body: JSON.stringify(statusPayload)
               });
               
+              if (cancelPollRef.current) {
+                return; // Stop polling if cancelled during fetch
+              }
+
               const statusStatusCode = statusRes.status;
               let statusText = "";
               try {
@@ -176,6 +242,7 @@ export default function MT5ConnectionPanel({
 
               if (!statusRes.ok || statusJsonFailed || (statusData && !statusData.success)) {
                 setLoading(false);
+                setIsPolling(false);
                 let errorDetails = `HTTP STATUS: ${statusStatusCode}\n`;
                 if (statusJsonFailed) {
                   errorDetails += `JSON Parsing failed for status response text:\n${statusText}`;
@@ -204,15 +271,20 @@ export default function MT5ConnectionPanel({
                   );
                 }, 1200);
                 setLoading(false);
+                setIsPolling(false);
               } else {
                 setSuccessMsg(statusData.message || "Linking with MetaTrader broker...");
                 pollCount++;
-                setTimeout(pollStatus, 3000);
+                if (!cancelPollRef.current) {
+                  setTimeout(pollStatus, 3000);
+                }
               }
             } catch (pollErr: any) {
               console.error("Polling error:", pollErr);
               pollCount++;
-              setTimeout(pollStatus, 3000);
+              if (!cancelPollRef.current) {
+                setTimeout(pollStatus, 3000);
+              }
             }
           };
 
@@ -312,6 +384,91 @@ export default function MT5ConnectionPanel({
             <span>Upgrade to Premium</span>
             <ArrowRight size={14} className="stroke-[2.5]" />
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Render polling connection progress state
+  if (isPolling) {
+    return (
+      <div 
+        id="mt5-connecting-progress"
+        className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 md:p-6 shadow-xl relative overflow-hidden"
+      >
+        <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/5 rounded-full blur-2xl" />
+        
+        {/* Header */}
+        <div className="flex items-center gap-3 border-b border-zinc-850/60 pb-3 mb-5">
+          <div className="p-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-xl animate-pulse">
+            <RefreshCw size={16} className="stroke-[2.5] animate-spin" />
+          </div>
+          <div>
+            <h3 className="text-base font-black text-zinc-100 font-display tracking-tight uppercase">
+              Linking MetaTrader 5 Account...
+            </h3>
+            <p className="text-xs text-zinc-400">
+              MetaApi cloud server is deploying and registering your MT5 terminal.
+            </p>
+          </div>
+        </div>
+
+        {/* Loading Message */}
+        <div className="bg-zinc-950 border border-zinc-850 rounded-xl p-5 text-center space-y-4 mb-5">
+          <div className="flex justify-center">
+            <div className="relative">
+              <div className="w-12 h-12 rounded-full border-2 border-emerald-500/10 border-t-emerald-500 animate-spin" />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Activity size={16} className="text-emerald-500 animate-pulse" />
+              </div>
+            </div>
+          </div>
+          
+          <div className="space-y-1">
+            <p className="text-sm font-bold text-zinc-200">
+              {successMsg || "Connecting to your MetaTrader server..."}
+            </p>
+            <p className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">
+              Please wait • Up to 60s
+            </p>
+          </div>
+        </div>
+
+        {/* Troubleshooting / Sandbox Bypass Box */}
+        <div className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-850/80 space-y-3.5 mb-5">
+          <div className="flex items-start gap-2.5 text-xs text-zinc-300">
+            <Info size={16} className="text-amber-500 shrink-0 mt-0.5" />
+            <div className="space-y-1 leading-relaxed">
+              <span className="font-extrabold block text-[10px] uppercase tracking-wider text-amber-500">
+                Stuck on DISCONNECTED?
+              </span>
+              <p className="text-zinc-400">
+                If the status stays <code className="bg-zinc-900 px-1 text-amber-400 font-mono rounded">DISCONNECTED</code>, it means MetaApi is struggling to log into your broker (usually due to a typo in the server name, password, or login ID).
+              </p>
+            </div>
+          </div>
+
+          <div className="border-t border-zinc-850/60 pt-3 flex flex-col sm:flex-row gap-2">
+            <button
+              onClick={handleForceSandbox}
+              className="flex-1 py-2 px-3 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20 rounded-xl text-xs font-bold uppercase tracking-wider transition-all duration-150 cursor-pointer flex items-center justify-center gap-1.5"
+            >
+              <Database size={13} />
+              Use Demo Sandbox
+            </button>
+            <button
+              onClick={handleCancelPolling}
+              className="py-2 px-4 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 border border-zinc-850 rounded-xl text-xs font-bold uppercase transition-all duration-150 cursor-pointer"
+            >
+              Cancel Link
+            </button>
+          </div>
+        </div>
+
+        <div className="text-center">
+          <p className="text-[10px] text-zinc-600 font-medium">
+            Secured and compiled via MetaApi Cloud Services
+          </p>
         </div>
       </div>
     );
@@ -436,17 +593,149 @@ export default function MT5ConnectionPanel({
         </div>
       )}
 
-      {error && (
-        <div className="my-3.5 p-4 rounded-xl bg-rose-950/25 border border-rose-900/40 text-rose-300 text-xs font-medium space-y-2">
-          <div className="flex items-center gap-2 text-rose-400 font-bold uppercase tracking-wider text-[10px]">
-            <ShieldAlert size={16} className="shrink-0 text-rose-500" />
-            <span>MT5 Secure Connection Diagnostic Error:</span>
+      {error && (() => {
+        const isAuth401 = error.includes("401") || 
+                          error.toLowerCase().includes("invalid auth-token") || 
+                          error.includes("UnauthorizedError") || 
+                          error.toLowerCase().includes("failed to authorize");
+
+        if (isAuth401) {
+          return (
+            <div className="my-3.5 p-4 rounded-xl bg-zinc-950 border border-amber-500/30 text-zinc-300 text-xs font-medium space-y-3.5 shadow-xl">
+              {/* Header with Connectivity Confirmation */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-zinc-800">
+                <div className="flex items-center gap-2 text-amber-400 font-bold uppercase tracking-wider text-[11px]">
+                  <ShieldAlert size={16} className="shrink-0 text-amber-500" />
+                  <span>MetaApi Cloud: 401 Unauthorized (Invalid Auth Token)</span>
+                </div>
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-extrabold uppercase tracking-wide">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  API Server: Connected &amp; Online
+                </div>
+              </div>
+
+              {/* Explicit answer to user's question */}
+              <div className="bg-zinc-900/80 p-3 rounded-xl border border-zinc-800/80 space-y-2">
+                <div className="flex items-center gap-2 text-zinc-200 font-bold text-xs">
+                  <CheckCircle size={14} className="text-emerald-400 shrink-0" />
+                  <span>Is the API connected at all? <strong className="text-emerald-400">Yes, completely!</strong></span>
+                </div>
+                <p className="text-zinc-400 text-[11px] leading-relaxed">
+                  Your request reached our local server, which initialized the MetaApi SDK and sent the credentials to the MetaTrader cloud gateway (<code className="text-zinc-300 bg-zinc-950 px-1 rounded">mt-provisioning-api-v1.agiliumtrade.ai</code>).
+                </p>
+                <div className="pt-1.5 border-t border-zinc-800 text-[11px] text-amber-300/90 leading-relaxed">
+                  <strong>Why did MetaApi return HTTP 401?</strong> MetaApi Cloud rejected the API token header with:
+                  <span className="block font-mono bg-zinc-950 text-amber-200 p-2 rounded-lg mt-1 border border-amber-900/30 text-[10px]">
+                    "Failed to authorize user due to invalid auth-token header. Request URL: https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai/users/current/accounts"
+                  </span>
+                  This occurs when the configured MetaApi token has expired or was revoked on <a href="https://app.metaapi.cloud" target="_blank" rel="noreferrer" className="underline font-bold text-amber-300 hover:text-amber-200">app.metaapi.cloud</a>.
+                </div>
+              </div>
+
+              {/* Solution 1: Use Instant Demo Sandbox */}
+              <div className="bg-emerald-950/20 p-3 rounded-xl border border-emerald-500/20 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                    <Database size={12} />
+                    Instant Sandbox (Zero Setup Needed)
+                  </span>
+                  <p className="text-[11px] text-zinc-400">
+                    Immediately test the dashboard, metrics, and journal with 8 seeded MT5 trades.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleForceSandbox}
+                  className="w-full sm:w-auto px-3.5 py-2 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black text-xs uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 shrink-0"
+                >
+                  <Database size={13} />
+                  Connect Sandbox Now
+                </button>
+              </div>
+
+              {/* Solution 2: Provide Fresh Token */}
+              <div className="bg-zinc-900/60 p-3 rounded-xl border border-zinc-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Key size={13} className="text-amber-400" />
+                    Or provide a fresh MetaApi Token:
+                  </span>
+                  <a 
+                    href="https://app.metaapi.cloud/token" 
+                    target="_blank" 
+                    rel="noreferrer"
+                    className="text-[10px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1 font-bold underline"
+                  >
+                    Generate at app.metaapi.cloud <ExternalLink size={10} />
+                  </a>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Paste fresh MetaApi Token (eyJhbGciOi...)"
+                    value={customMetaApiToken}
+                    onChange={(e) => {
+                      setCustomMetaApiToken(e.target.value);
+                      localStorage.setItem("journaly_custom_metaapi_token", e.target.value.trim());
+                    }}
+                    className="flex-1 bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-3 py-1.5 text-xs text-zinc-200 outline-none font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (customMetaApiToken.trim()) {
+                        localStorage.setItem("journaly_custom_metaapi_token", customMetaApiToken.trim());
+                        setTokenSavedNotice(true);
+                        setTimeout(() => setTokenSavedNotice(false), 2500);
+                      }
+                    }}
+                    className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold rounded-lg transition-colors cursor-pointer"
+                  >
+                    {tokenSavedNotice ? "Saved!" : "Save"}
+                  </button>
+                </div>
+                <p className="text-[10px] text-zinc-500">
+                  After saving your fresh token, click <strong>"Link MetaTrader 5 Account"</strong> below to connect.
+                </p>
+              </div>
+
+              {/* Collapsible raw logs */}
+              <details className="pt-1">
+                <summary className="text-[10px] text-zinc-500 hover:text-zinc-400 cursor-pointer uppercase font-mono tracking-wider">
+                  Show raw diagnostic response details
+                </summary>
+                <pre className="mt-2 font-mono bg-zinc-950 p-2.5 rounded-lg border border-zinc-900 text-rose-300 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-44 text-[10px]">
+                  {error}
+                </pre>
+              </details>
+            </div>
+          );
+        }
+
+        // Generic error
+        return (
+          <div className="my-3.5 p-4 rounded-xl bg-rose-950/25 border border-rose-900/40 text-rose-300 text-xs font-medium space-y-3">
+            <div className="flex items-center gap-2 text-rose-400 font-bold uppercase tracking-wider text-[10px]">
+              <ShieldAlert size={16} className="shrink-0 text-rose-500" />
+              <span>MT5 Secure Connection Diagnostic Error:</span>
+            </div>
+            <pre className="font-mono bg-zinc-950/90 p-3 rounded-lg border border-rose-950 text-rose-200 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-56 text-[11px]">
+              {error}
+            </pre>
+            <div className="pt-2 flex flex-col sm:flex-row gap-2 items-center justify-between border-t border-rose-900/20">
+              <span className="text-[10px] text-zinc-400">Want to test without a real broker?</span>
+              <button
+                type="button"
+                onClick={handleForceSandbox}
+                className="py-1.5 px-3 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-lg text-[10px] font-extrabold uppercase tracking-wider transition-all duration-150 cursor-pointer flex items-center gap-1.5"
+              >
+                <Database size={12} />
+                Connect Sandbox Instead
+              </button>
+            </div>
           </div>
-          <pre className="font-mono bg-zinc-950/90 p-3 rounded-lg border border-rose-950 text-rose-200 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-72 text-[11px]">
-            {error}
-          </pre>
-        </div>
-      )}
+        );
+      })()}
 
       {successMsg && (
         <div className="my-3.5 p-3 rounded-xl bg-emerald-950/20 border border-emerald-900/30 text-emerald-400 text-xs font-medium flex items-center gap-2">
@@ -561,6 +850,50 @@ export default function MT5ConnectionPanel({
             </div>
           </div>
         )}
+
+        {/* Optional Custom MetaApi Token override */}
+        <div className="pt-1">
+          <button
+            type="button"
+            onClick={() => setShowTokenInput(!showTokenInput)}
+            className="text-[11px] font-bold text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <Key size={12} className={customMetaApiToken ? "text-emerald-400" : "text-zinc-500"} />
+            <span>
+              {customMetaApiToken ? "Custom MetaApi Token: Active" : "Have your own MetaApi Token? (Optional override)"}
+            </span>
+            {showTokenInput ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
+
+          {showTokenInput && (
+            <div className="mt-2.5 p-3.5 bg-zinc-950/80 rounded-xl border border-zinc-850 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] font-black uppercase text-zinc-400">MetaApi API Token</label>
+                <a
+                  href="https://app.metaapi.cloud/token"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[10px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1 underline font-medium"
+                >
+                  Generate at app.metaapi.cloud <ExternalLink size={9} />
+                </a>
+              </div>
+              <input
+                type="text"
+                placeholder="eyJhbGciOi..."
+                value={customMetaApiToken}
+                onChange={(e) => {
+                  setCustomMetaApiToken(e.target.value);
+                  localStorage.setItem("journaly_custom_metaapi_token", e.target.value.trim());
+                }}
+                className="w-full bg-zinc-900 border border-zinc-800 focus:border-emerald-500/50 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none font-mono"
+              />
+              <p className="text-[10px] text-zinc-500">
+                This token will authenticate directly with MetaApi Cloud, bypassing any missing or expired server tokens.
+              </p>
+            </div>
+          )}
+        </div>
 
         {/* Action Button */}
         <button

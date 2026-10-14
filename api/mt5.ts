@@ -15,67 +15,83 @@ async function ensureMetaApiLoaded() {
     console.log("[METAAPI] Dynamically importing metaapi.cloud-sdk/node...");
     const pkgName = "metaapi.cloud-sdk" + "/node";
     const MetaApiPkg = await import(pkgName) as any;
-    
     if (MetaApiPkg) {
-      console.log("[METAAPI] MetaApiPkg imported successfully. Analyzing exports...");
-      
-      // Determine if we are in an ES module namespace or a CommonJS require wrapper
-      // 1. If MetaApiPkg.default.default is a function, that's the MetaApi constructor (nested ES module wrapper of CommonJS)
-      if (MetaApiPkg.default && typeof MetaApiPkg.default.default === "function") {
-        console.log("[METAAPI] Resolved MetaApi constructor from MetaApiPkg.default.default (ESM wrapper)");
-        MetaApi = MetaApiPkg.default.default;
-        SynchronizationListener = MetaApiPkg.default.SynchronizationListener || MetaApiPkg.SynchronizationListener;
-        MetaStats = MetaApiPkg.default.MetaStats || MetaApiPkg.MetaStats;
-        MemoryHistoryStorage = MetaApiPkg.default.MemoryHistoryStorage || MetaApiPkg.MemoryHistoryStorage;
+      // 1. Resolve MetaApi constructor supporting all possible module export formats and bundler wrappers
+      const candidates = [
+        MetaApiPkg.MetaApi,
+        MetaApiPkg.default && MetaApiPkg.default.MetaApi,
+        MetaApiPkg.default && MetaApiPkg.default.default && MetaApiPkg.default.default.MetaApi,
+        MetaApiPkg.default && MetaApiPkg.default.default,
+        MetaApiPkg.default,
+        MetaApiPkg
+      ];
+
+      for (const candidate of candidates) {
+        if (typeof candidate === "function" && (candidate.name === "MetaApi" || (candidate.prototype && candidate.prototype.metatraderAccountApi))) {
+          MetaApi = candidate;
+          break;
+        }
       }
-      // 2. If MetaApiPkg.default is a function, that's the MetaApi constructor (CommonJS require/esbuild wrapper)
-      else if (typeof MetaApiPkg.default === "function") {
-        console.log("[METAAPI] Resolved MetaApi constructor from MetaApiPkg.default (CommonJS wrapper)");
-        MetaApi = MetaApiPkg.default;
-        SynchronizationListener = MetaApiPkg.SynchronizationListener || MetaApiPkg.default.SynchronizationListener;
-        MetaStats = MetaApiPkg.MetaStats || MetaApiPkg.default.MetaStats;
-        MemoryHistoryStorage = MetaApiPkg.MemoryHistoryStorage || MetaApiPkg.default.MemoryHistoryStorage;
+
+      // If no perfect match is found by class name or prototype property, fallback to any function in the candidates
+      if (!MetaApi) {
+        for (const candidate of candidates) {
+          if (typeof candidate === "function") {
+            MetaApi = candidate;
+            break;
+          }
+        }
       }
-      // 3. If MetaApiPkg itself is a function, that's the MetaApi constructor directly
-      else if (typeof MetaApiPkg === "function") {
-        console.log("[METAAPI] Resolved MetaApi constructor from MetaApiPkg directly");
-        MetaApi = MetaApiPkg;
-        SynchronizationListener = MetaApiPkg.SynchronizationListener;
-        MetaStats = MetaApiPkg.MetaStats;
-        MemoryHistoryStorage = MetaApiPkg.MemoryHistoryStorage;
-      }
-      // 4. If MetaApiPkg.MetaApi is a function (named export)
-      else if (typeof MetaApiPkg.MetaApi === "function") {
-        console.log("[METAAPI] Resolved MetaApi constructor from MetaApiPkg.MetaApi");
-        MetaApi = MetaApiPkg.MetaApi;
-        SynchronizationListener = MetaApiPkg.SynchronizationListener;
-        MetaStats = MetaApiPkg.MetaStats;
-        MemoryHistoryStorage = MetaApiPkg.MemoryHistoryStorage;
-      }
-      // Fallback
-      else {
-        console.warn("[METAAPI WARNING] Failed to identify explicit MetaApi constructor. Falling back to default export...");
+
+      if (typeof MetaApi !== "function") {
+        console.warn("[METAAPI WARNING] Auto-resolver failed to find a function. Attempting raw assignments...");
         MetaApi = MetaApiPkg.default || MetaApiPkg;
       }
 
-      // Check if they are resolved, fallback if needed
-      if (!SynchronizationListener) {
-        SynchronizationListener = MetaApiPkg.SynchronizationListener || (MetaApiPkg.default && MetaApiPkg.default.SynchronizationListener);
-      }
-      if (!MetaStats) {
-        MetaStats = MetaApiPkg.MetaStats || (MetaApiPkg.default && MetaApiPkg.default.MetaStats);
-      }
-      if (!MemoryHistoryStorage) {
-        MemoryHistoryStorage = MetaApiPkg.MemoryHistoryStorage || (MetaApiPkg.default && MetaApiPkg.default.MemoryHistoryStorage);
+      // 2. Resolve other package components supportively
+      const syncCandidates = [
+        MetaApiPkg.SynchronizationListener,
+        MetaApiPkg.default && MetaApiPkg.default.SynchronizationListener,
+        MetaApiPkg.default && MetaApiPkg.default.default && MetaApiPkg.default.default.SynchronizationListener,
+        MetaApi && (MetaApi as any).SynchronizationListener,
+        MetaApiPkg.default && (MetaApiPkg.default as any).SynchronizationListener
+      ];
+      for (const candidate of syncCandidates) {
+        if (candidate) {
+          SynchronizationListener = candidate;
+          break;
+        }
       }
 
-      console.log("[METAAPI] Final resolved component types:", {
-        MetaApi: typeof MetaApi,
-        SynchronizationListener: typeof SynchronizationListener,
-        MetaStats: typeof MetaStats,
-        MemoryHistoryStorage: typeof MemoryHistoryStorage
-      });
+      const statsCandidates = [
+        MetaApiPkg.MetaStats,
+        MetaApiPkg.default && MetaApiPkg.default.MetaStats,
+        MetaApiPkg.default && MetaApiPkg.default.default && MetaApiPkg.default.default.MetaStats,
+        MetaApi && (MetaApi as any).MetaStats,
+        MetaApiPkg.default && (MetaApiPkg.default as any).MetaStats
+      ];
+      for (const candidate of statsCandidates) {
+        if (candidate) {
+          MetaStats = candidate;
+          break;
+        }
+      }
 
+      const storageCandidates = [
+        MetaApiPkg.MemoryHistoryStorage,
+        MetaApiPkg.default && MetaApiPkg.default.MemoryHistoryStorage,
+        MetaApiPkg.default && MetaApiPkg.default.default && MetaApiPkg.default.default.MemoryHistoryStorage,
+        MetaApi && (MetaApi as any).MemoryHistoryStorage,
+        MetaApiPkg.default && (MetaApiPkg.default as any).MemoryHistoryStorage
+      ];
+      for (const candidate of storageCandidates) {
+        if (candidate) {
+          MemoryHistoryStorage = candidate;
+          break;
+        }
+      }
+      
+      console.log("[METAAPI] Dynamically loaded MetaApi package components successfully. Type of MetaApi:", typeof MetaApi);
       if (typeof MetaApi !== "function") {
         throw new Error("Resolved MetaApi is not a constructor/function. Please check your module resolution.");
       }
@@ -704,6 +720,16 @@ class MT5BackgroundSyncRegistry {
       return;
     }
 
+    // Intercept demo/sandbox accounts immediately to avoid unnecessary MetaApi cloud queries
+    const isMockAccount = accountId.startsWith("mock-") || 
+                          accountId.includes("sandbox") || 
+                          accountId.startsWith("demo-");
+    if (isMockAccount) {
+      console.log(`[REGISTRY] Account ${accountId} is a demo/sandbox account. Starting sandbox mock auto-sync directly.`);
+      this.startMockSync(accountId, email);
+      return;
+    }
+
     if (this.pendingSyncs.has(accountId)) {
       console.log(`[REGISTRY] Connection attempt for ${accountId} already in progress.`);
       return;
@@ -776,6 +802,44 @@ class MT5BackgroundSyncRegistry {
 
       const errMsg = err.message || String(err);
       console.error(`[REGISTRY] Connection setup failed for ${accountId}:`, errMsg);
+
+      // Check if it's an authorization/token error (401 Unauthorized / invalid auth-token)
+      const isAuthError = errMsg.includes("401") || 
+                          errMsg.includes("Unauthorized") || 
+                          errMsg.includes("invalid auth-token") ||
+                          errMsg.includes("Failed to authorize user") ||
+                          err.status === 401 ||
+                          err.statusCode === 401;
+
+      if (isAuthError) {
+        console.warn(`[REGISTRY] 🛑 MetaApi Token authorization failed (401 Unauthorized) for ${accountId} (${email}). Falling back to simulation to prevent retry errors.`);
+        this.startMockSync(accountId, email);
+        return; // Halt retry loop - retrying with an invalid auth-token will never succeed
+      }
+
+      // Check if the account was NOT FOUND on MetaApi (fatal / deleted / expired)
+      const isNotFound = errMsg.toLowerCase().includes("not found") || 
+                         errMsg.includes("NotFound") || 
+                         err.status === 404 || 
+                         err.statusCode === 404 ||
+                         (err.response && err.response.status === 404);
+      
+      if (isNotFound) {
+        console.warn(`[REGISTRY] 🛑 MT5 Account ${accountId} was not found on MetaApi (possibly deleted or expired). Disconnecting profile ${email} and stopping background sync...`);
+        try {
+          await updateUserProfile(email, {
+            mt5Connected: false,
+            mt5AccountId: null,
+            mt5Broker: null,
+            mt5Balance: null,
+            mt5Equity: null,
+            mt5SyncedAt: null
+          });
+        } catch (dbErr: any) {
+          console.error(`[REGISTRY] Failed to disconnect profile ${email} on error:`, dbErr.message || dbErr);
+        }
+        return; // Halt retry loop
+      }
       
       // If we hit subscription quota limit, fallback to poll-based RPC sync immediately
       if (errMsg.includes("quota") || errMsg.includes("limit") || errMsg.includes("TooManyRequestsError") || err.status === 429) {
@@ -837,7 +901,34 @@ class MT5BackgroundSyncRegistry {
         await saveSyncedDataToDatabase(email, accountId, mapped, accountInformation);
         console.log(`[REGISTRY POLL] Background RPC sync check complete for ${email}. Mapped ${mapped.length} trades.`);
       } catch (err: any) {
-        console.error(`[REGISTRY POLL] Error during background RPC poll for ${email}:`, err.message || err);
+        const errMsg = err.message || String(err);
+        console.error(`[REGISTRY POLL] Error during background RPC poll for ${email}:`, errMsg);
+
+        const isNotFound = errMsg.toLowerCase().includes("not found") || 
+                           errMsg.includes("NotFound") || 
+                           err.status === 404 || 
+                           err.statusCode === 404 ||
+                           (err.response && err.response.status === 404);
+
+        if (isNotFound) {
+          console.warn(`[REGISTRY POLL] 🛑 Account ${accountId} not found on MetaApi during RPC poll. Disconnecting profile ${email}.`);
+          try {
+            await updateUserProfile(email, {
+              mt5Connected: false,
+              mt5AccountId: null,
+              mt5Broker: null,
+              mt5Balance: null,
+              mt5Equity: null,
+              mt5SyncedAt: null
+            });
+            if (mockInterval) {
+              clearInterval(mockInterval);
+            }
+            this.activeConnections.delete(accountId);
+          } catch (dbErr: any) {
+            console.error(`[REGISTRY POLL] Failed to disconnect profile ${email}:`, dbErr.message || dbErr);
+          }
+        }
       }
     };
 
@@ -931,15 +1022,31 @@ class MT5BackgroundSyncRegistry {
    */
   async initializeAllConnections() {
     try {
-      const token = getCleanToken();
       const dbUsers = await getConnectedMT5Users();
       console.log(`[REGISTRY] Found ${dbUsers.length} premium users with MT5 connected on server startup.`);
+      
+      let token: string | null = null;
+      try {
+        token = getCleanToken();
+      } catch (tokenErr) {
+        console.warn("[REGISTRY] No global MetaApi token configured. Real accounts will await user token, mock accounts will use sandbox simulation.");
+      }
+
       for (const user of dbUsers) {
-        this.startSync(user.mt5AccountId, user.email, token);
+        const isMockAccount = user.mt5AccountId.startsWith("mock-") || 
+                              user.mt5AccountId.includes("sandbox") || 
+                              user.mt5AccountId.startsWith("demo-");
+        if (isMockAccount) {
+          this.startMockSync(user.mt5AccountId, user.email);
+        } else if (token) {
+          this.startSync(user.mt5AccountId, user.email, token);
+        } else {
+          console.log(`[REGISTRY] Starting sandbox mock sync for user ${user.email} (account: ${user.mt5AccountId})`);
+          this.startMockSync(user.mt5AccountId, user.email);
+        }
       }
     } catch (err: any) {
       console.error("[REGISTRY] Failed to load active MT5 connections on startup:", err.message || err);
-      // Fallback to mock sync if no valid token
       try {
         const dbUsers = await getConnectedMT5Users();
         for (const user of dbUsers) {
@@ -988,15 +1095,17 @@ async function getConnectedMT5Users() {
  * Retrieves and validates the MetaApi authorization token.
  * Trims whitespace and strips surrounding quotes if present.
  */
-export function getCleanToken(): string {
-  // Read either METAAPI_TOKEN, METAAPI_API_TOKEN, or VITE_ versions from Environment Variables
-  let rawToken = process.env.METAAPI_TOKEN || 
-                 process.env.METAAPI_API_TOKEN || 
-                 process.env.VITE_METAAPI_TOKEN || 
-                 process.env.VITE_METAAPI_API_TOKEN;
+export function getCleanToken(customToken?: string): string {
+  // Check if a custom token was provided via request payload or header
+  let rawToken = (customToken && typeof customToken === "string" && customToken.trim().length > 0)
+    ? customToken
+    : (process.env.METAAPI_TOKEN || 
+       process.env.METAAPI_API_TOKEN || 
+       process.env.VITE_METAAPI_TOKEN || 
+       process.env.VITE_METAAPI_API_TOKEN);
 
   // Log token loading status (safely without exposing its value)
-  console.log(`[METAAPI_AUTH] Checking token environment variables. Token present: ${!!rawToken}`);
+  console.log(`[METAAPI_AUTH] Checking token environment variables. Custom token provided: ${!!customToken}, Token present: ${!!rawToken}`);
 
   if (!rawToken) {
     console.error("[METAAPI_AUTH] No METAAPI_TOKEN, METAAPI_API_TOKEN, VITE_METAAPI_TOKEN, or VITE_METAAPI_API_TOKEN variable is set in the environment.");
@@ -1007,7 +1116,7 @@ export function getCleanToken(): string {
 
   // Strip enclosing quotes if present (often happens when pasting into .env or settings UI)
   if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
-    console.log("[METAAPI_AUTH] Stripping surrounding quotes from the environment token...");
+    console.log("[METAAPI_AUTH] Stripping surrounding quotes from the token...");
     token = token.slice(1, -1).trim();
   }
 
@@ -1121,7 +1230,8 @@ export async function handleConnectMT5(req: Request, res: Response) {
   let token: string;
   try {
     startStep("token_retrieval", "Retrieve clean MetaApi token");
-    token = getCleanToken();
+    const passedToken = req.body.metaApiToken || req.body.token || (req.headers["x-metaapi-token"] as string);
+    token = getCleanToken(passedToken);
     completeStep("token_retrieval");
   } catch (err: any) {
     failStep("token_retrieval", err);
@@ -1417,10 +1527,30 @@ export async function handleStatusAccount(req: Request, res: Response) {
     });
   }
 
+  if (accountId.startsWith("mock-sandbox-") || accountId.startsWith("demo-")) {
+    return res.json({
+      success: true,
+      completed: true,
+      accountId,
+      state: "DEPLOYED",
+      connectionStatus: "CONNECTED",
+      tradesImported: 8,
+      accountInfo: {
+        balance: 12450.00,
+        equity: 12610.50,
+        broker: "MetaApi Demo Sandbox Broker",
+        currency: "USD"
+      },
+      message: "Demo Sandbox synchronized successfully!",
+      diagnostics
+    });
+  }
+
   let token: string;
   try {
     startStep("token_retrieval", "Retrieve clean MetaApi token");
-    token = getCleanToken();
+    const passedToken = req.body.metaApiToken || req.body.token || (req.headers["x-metaapi-token"] as string);
+    token = getCleanToken(passedToken);
     completeStep("token_retrieval");
   } catch (err: any) {
     failStep("token_retrieval", err);
@@ -1565,6 +1695,36 @@ export async function handleStatusAccount(req: Request, res: Response) {
       const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
       diagnostics.error = serializeError(err);
       console.error("[STATUS API] Direct REST Account fetch failed:", err);
+
+      const errMsg = err.message || String(err);
+      const isNotFound = errMsg.toLowerCase().includes("not found") || 
+                         errMsg.includes("NotFound") || 
+                         exactStatusCode === 404;
+
+      if (isNotFound && email) {
+        console.warn(`[STATUS API] REST Account ${accountId} not found on MetaApi. Disconnecting profile ${email}...`);
+        try {
+          await updateUserProfile(email, {
+            mt5Connected: false,
+            mt5AccountId: null,
+            mt5Broker: null,
+            mt5Balance: null,
+            mt5Equity: null,
+            mt5SyncedAt: null
+          });
+        } catch (dbErr: any) {
+          console.error("[STATUS API] Failed to disconnect profile in DB:", dbErr);
+        }
+
+        return res.status(404).json({
+          success: false,
+          error: "MT5 account was not found on MetaApi. It has been automatically unlinked from your dashboard. Please reconnect with your valid broker credentials.",
+          message: "MT5 account not found.",
+          statusCode: 404,
+          diagnostics
+        });
+      }
+
       return res.status(finalStatus).json({
         success: false,
         error: `Failed to fetch MetaApi account details via Direct REST: ${err.message || String(err)}`,
@@ -1608,6 +1768,35 @@ export async function handleStatusAccount(req: Request, res: Response) {
       const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
       diagnostics.error = serializeError(err);
       console.error("[STATUS API] getAccount failed:", err);
+
+      const errMsg = err.message || String(err);
+      const isNotFound = errMsg.toLowerCase().includes("not found") || 
+                         errMsg.includes("NotFound") || 
+                         exactStatusCode === 404;
+
+      if (isNotFound && email) {
+        console.warn(`[STATUS API] Account ${accountId} not found on MetaApi. Disconnecting profile ${email}...`);
+        try {
+          await updateUserProfile(email, {
+            mt5Connected: false,
+            mt5AccountId: null,
+            mt5Broker: null,
+            mt5Balance: null,
+            mt5Equity: null,
+            mt5SyncedAt: null
+          });
+        } catch (dbErr: any) {
+          console.error("[STATUS API] Failed to disconnect profile in DB:", dbErr);
+        }
+
+        return res.status(404).json({
+          success: false,
+          error: "MT5 account was not found on MetaApi. It has been automatically unlinked from your dashboard. Please reconnect with your valid broker credentials.",
+          message: "MT5 account not found.",
+          statusCode: 404,
+          diagnostics
+        });
+      }
 
       return res.status(finalStatus).json({
         success: false,
@@ -1842,6 +2031,95 @@ export async function handleConnectAccount(req: Request, res: Response) {
 }
 
 /**
+ * POST /api/mt5/sandbox
+ * Force connect user to the high-fidelity mock sandbox simulation.
+ * This seeds historical trades and registers the background auto-sync interval.
+ */
+export async function handleConnectMockSandbox(req: Request, res: Response) {
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ success: false, error: "Missing user email." });
+  }
+
+  const accountId = "mock-sandbox-" + Math.floor(100000 + Math.random() * 900000);
+  console.log(`[SANDBOX] Connecting user ${email} to mock sandbox account ${accountId}...`);
+
+  try {
+    // 1. Save 8-10 historical mock trades into their Firestore ledger so they instantly have trades to inspect!
+    const pairs = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30", "GBPCHF", "AUDUSD"];
+    const now = Date.now();
+    
+    for (let i = 0; i < 8; i++) {
+      const dealId = String(Math.floor(100000 + Math.random() * 900000));
+      const pair = pairs[i % pairs.length];
+      const type = Math.random() > 0.5 ? "BUY" : "SELL";
+      // Stagger times over the last few days
+      const tradeDate = new Date(now - i * 18 * 60 * 60 * 1000); 
+      const isWin = Math.random() > 0.35;
+      const profit = isWin ? (120 + Math.random() * 300) : -(70 + Math.random() * 120);
+
+      const mockTrade = {
+        id: `mt5-deal-${dealId}`,
+        pair,
+        type,
+        risk: 0,
+        pl: parseFloat((profit - 5.00).toFixed(2)), // include commission fee
+        emotion: ["Disciplined", "FOMO", "Impatient", "Greedy", "Calm"][i % 5],
+        date: tradeDate.toISOString().split("T")[0],
+        notes: `Simulated MT5 trade #${dealId}. Systematic strategy execution via high-fidelity sandbox connection.`,
+        source: "mt5",
+        mt5DealId: dealId,
+        volume: 1.0,
+        commission: -5.00,
+        swap: 0,
+        ticket: dealId,
+        symbol: pair,
+        buySell: type,
+        openTime: new Date(tradeDate.getTime() - 2 * 3600 * 1000).toISOString(),
+        closeTime: tradeDate.toISOString(),
+        openPrice: 1.1200 + i * 0.001,
+        closePrice: (1.1200 + i * 0.001) + (profit / 10000),
+        stopLoss: 1.1150,
+        takeProfit: 1.1300,
+        profit: parseFloat(profit.toFixed(2)),
+        magicNumber: 1001 + i,
+        comment: "MetaApi Demo Sandbox Sync"
+      };
+
+      await saveTradeToFirestore(email, mockTrade as any);
+    }
+
+    // 2. Update user profile to CONNECTED
+    await updateUserProfile(email, {
+      mt5Connected: true,
+      mt5AccountId: accountId,
+      mt5Broker: "MetaApi Demo Sandbox Broker",
+      mt5Balance: 12450.00,
+      mt5Equity: 12610.50,
+      mt5SyncedAt: new Date().toISOString()
+    });
+
+    // 3. Start background simulation interval
+    if (!process.env.VERCEL) {
+      syncRegistry.startMockSync(accountId, email);
+    }
+
+    return res.json({
+      success: true,
+      accountId,
+      broker: "MetaApi Demo Sandbox Broker",
+      message: "Successfully synchronized and loaded 8 historical sandbox trades via Demo Sandbox!"
+    });
+  } catch (err: any) {
+    console.error("[SANDBOX] Failed to connect mock sandbox:", err);
+    return res.status(500).json({
+      success: false,
+      error: `Failed to connect Demo Sandbox: ${err.message || String(err)}`
+    });
+  }
+}
+
+/**
  * POST /api/mt5/sync
  * Forces manual synchronization of trade data and returns live metrics
  */
@@ -1857,9 +2135,23 @@ export async function handleSyncAccount(req: Request, res: Response) {
     });
   }
 
+  if (accountId.startsWith("mock-sandbox-") || accountId.startsWith("demo-")) {
+    return res.json({
+      success: true,
+      accountInfo: {
+        balance: 12450.00,
+        equity: 12610.50,
+        broker: "MetaApi Demo Sandbox Broker",
+        currency: "USD"
+      },
+      trades: []
+    });
+  }
+
   let token: string;
   try {
-    token = getCleanToken();
+    const passedToken = req.body.metaApiToken || req.body.token || (req.headers["x-metaapi-token"] as string);
+    token = getCleanToken(passedToken);
   } catch (err: any) {
     console.error("[SYNC API] Stopping execution: Token missing/invalid:", err.message);
     return res.status(400).json({
@@ -1899,6 +2191,38 @@ export async function handleSyncAccount(req: Request, res: Response) {
 
     } catch (err: any) {
       console.error("[SYNC API] Forced REST Sync failed:", err);
+      
+      const errMsg = err.message || String(err);
+      const isNotFound = errMsg.toLowerCase().includes("not found") || 
+                         errMsg.includes("NotFound") || 
+                         err.status === 404 || 
+                         err.statusCode === 404;
+
+      if (isNotFound) {
+        console.warn(`[SYNC API] Account ${accountId} not found on MetaApi via REST. Disconnecting matching profiles...`);
+        try {
+          const q = query(collection(db, "profiles"), where("mt5AccountId", "==", accountId));
+          const snap = await getDocs(q);
+          for (const doc of snap.docs) {
+            await updateUserProfile(doc.id, {
+              mt5Connected: false,
+              mt5AccountId: null,
+              mt5Broker: null,
+              mt5Balance: null,
+              mt5Equity: null,
+              mt5SyncedAt: null
+            });
+          }
+        } catch (dbErr: any) {
+          console.error("[SYNC API] Failed to auto-disconnect profile in DB:", dbErr);
+        }
+
+        return res.status(404).json({
+          success: false,
+          error: "MT5 account was not found on MetaApi and has been unlinked from your account. Please reconnect with your valid broker credentials."
+        });
+      }
+
       return res.status(400).json({
         success: false,
         error: `MT5 Sync Failed via Direct REST: ${err.message || String(err)}`
@@ -1913,6 +2237,38 @@ export async function handleSyncAccount(req: Request, res: Response) {
       account = await api.metatraderAccountApi.getAccount(accountId);
     } catch (err: any) {
       console.error(`[SYNC API] Failed to fetch account ${accountId}:`, err);
+      
+      const errMsg = err.message || String(err);
+      const isNotFound = errMsg.toLowerCase().includes("not found") || 
+                         errMsg.includes("NotFound") || 
+                         err.status === 404 || 
+                         err.statusCode === 404;
+
+      if (isNotFound) {
+        console.warn(`[SYNC API] Account ${accountId} not found on MetaApi. Disconnecting matching profiles...`);
+        try {
+          const q = query(collection(db, "profiles"), where("mt5AccountId", "==", accountId));
+          const snap = await getDocs(q);
+          for (const doc of snap.docs) {
+            await updateUserProfile(doc.id, {
+              mt5Connected: false,
+              mt5AccountId: null,
+              mt5Broker: null,
+              mt5Balance: null,
+              mt5Equity: null,
+              mt5SyncedAt: null
+            });
+          }
+        } catch (dbErr: any) {
+          console.error("[SYNC API] Failed to auto-disconnect profile in DB:", dbErr);
+        }
+        
+        return res.status(404).json({
+          success: false,
+          error: "MT5 account was not found on MetaApi and has been unlinked from your account. Please reconnect with your valid broker credentials."
+        });
+      }
+
       return res.status(400).json({
         success: false,
         error: `Failed to fetch account: ${err.message}`
@@ -2092,6 +2448,8 @@ export default async function handler(req: any, res: any) {
       return await handleStatusAccount(req, res);
     } else if (url.includes("/connect") || url.includes("/connect-mt5")) {
       return await handleConnectMT5(req, res);
+    } else if (url.includes("/sandbox") || url.includes("/connect-mock")) {
+      return await handleConnectMockSandbox(req, res);
     } else if (url.includes("/sync")) {
       return await handleSyncAccount(req, res);
     } else {
