@@ -13,6 +13,22 @@ const PORT = 3000;
 
 app.use(express.json());
 
+// Enable CORS and OPTIONS handling for all API endpoints
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS,PATCH,DELETE,POST,PUT");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, auth-token, x-metaapi-token"
+  );
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
+  next();
+});
+
 // API routing for secure, backend-initiated SMTP verification mails - unified with Vercel function
 app.post("/api/send-code", sendCodeHandler);
 

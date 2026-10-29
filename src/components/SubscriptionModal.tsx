@@ -29,10 +29,17 @@ export default function SubscriptionModal({ email, onClose }: SubscriptionModalP
         })
       });
 
-      const data = await res.json();
+      const rawText = await res.text();
+      const contentType = res.headers.get("content-type") || "";
+      let data: any = null;
+      if (contentType.includes("application/json")) {
+        try {
+          data = JSON.parse(rawText);
+        } catch {}
+      }
 
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || "Failed to initiate payment. Please contact support.");
+      if (!res.ok || !data || !data.success) {
+        throw new Error((data && data.error) || (res.status === 403 ? "Payment initialization forbidden (HTTP 403)." : `Server error (HTTP ${res.status})`));
       }
 
       console.log(`[PAYSTACK CHECKOUT] Secure redirect URL obtained. Redirecting to Paystack: ${data.authorizationUrl}`);

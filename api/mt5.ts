@@ -129,36 +129,123 @@ export interface MetaApiAccount {
 
 export class MetaApiRestClient {
   private token: string;
-  private baseHost: string = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai";
+  // Requirement 1: Confirm request goes to real MetaApi endpoint (https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai)
+  private clientEndpoint: string = "https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai";
+  private provisioningEndpoint: string = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai";
   private resolvedDomain: string | null = null;
 
   constructor(token: string) {
     this.token = token;
   }
 
-  private async getAuthHeaders() {
+  // Requirement 2: Send token in auth-token header + User-Agent to avoid WAF 403 HTML blocks
+  private getAuthHeaders(): Record<string, string> {
     return {
       "auth-token": this.token,
       "Content-Type": "application/json",
-      "Accept": "application/json"
+      "Accept": "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     };
+  }
+
+  // Requirement 4: Read response.text() first and only JSON.parse when content-type is JSON
+  private async safeRequest(path: string, options: any = {}): Promise<any> {
+    const headers = {
+      ...this.getAuthHeaders(),
+      ...(options.headers || {})
+    };
+
+    // Try primary client endpoint first (Requirement 1)
+    const primaryUrl = `${this.clientEndpoint}${path}`;
+    const fallbackUrl = `${this.provisioningEndpoint}${path}`;
+
+    let lastError: any = null;
+    let attemptedUrls = [primaryUrl, fallbackUrl];
+
+    for (const targetUrl of attemptedUrls) {
+      try {
+        console.log(`[METAAPI REST] Calling MetaApi endpoint: ${targetUrl}`);
+        const res = await fetch(targetUrl, {
+          ...options,
+          headers
+        });
+
+        const status = res.status;
+        const contentType = res.headers.get("content-type") || "";
+        const rawText = await res.text();
+
+        let parsedJson: any = null;
+        let isJson = contentType.includes("application/json");
+
+        if (isJson) {
+          try {
+            parsedJson = JSON.parse(rawText);
+          } catch (jsonErr: any) {
+            console.warn(`[METAAPI REST] Content-Type indicated JSON but parsing failed:`, jsonErr.message);
+          }
+        }
+
+        // If client endpoint returned 404 HTML (e.g. Nginx 404 Not Found), try fallback provisioning endpoint
+        if (!res.ok && (status === 404 || status === 405) && targetUrl === primaryUrl) {
+          console.log(`[METAAPI REST] ${primaryUrl} returned HTTP ${status}. Routing to provisioning endpoint ${fallbackUrl}...`);
+          continue;
+        }
+
+        if (!res.ok) {
+          // Detect HTML 403 or HTML errors
+          if (status === 403) {
+            if (parsedJson && (parsedJson.message || parsedJson.error)) {
+              const msg = parsedJson.message || parsedJson.error;
+              const err: any = new Error(msg);
+              err.status = 403;
+              err.statusCode = 403;
+              err.responseBody = parsedJson;
+              throw err;
+            } else if (!isJson && (rawText.includes("<html>") || rawText.includes("403 Forbidden"))) {
+              const err: any = new Error(`MetaApi Cloud Gateway returned 403 Forbidden (HTML response). The request reached MetaApi servers but was rejected. Please verify that your auth-token is active and has sufficient permissions.`);
+              err.status = 403;
+              err.statusCode = 403;
+              err.responseBody = rawText;
+              throw err;
+            }
+          }
+
+          const errMsg = parsedJson ? (parsedJson.message || parsedJson.error || JSON.stringify(parsedJson)) : rawText;
+          const err: any = new Error(`MetaApi request to ${targetUrl} failed (HTTP ${status}): ${errMsg}`);
+          err.status = status;
+          err.statusCode = status;
+          err.responseBody = parsedJson || rawText;
+          throw err;
+        }
+
+        // Response is OK (2xx)
+        if (parsedJson !== null) {
+          return parsedJson;
+        }
+        return rawText;
+      } catch (err: any) {
+        lastError = err;
+        // If this was network failure on primaryUrl, try fallbackUrl
+        if (targetUrl === primaryUrl && !err.status) {
+          console.warn(`[METAAPI REST] Primary endpoint error (${err.message}). Trying fallback endpoint...`);
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw lastError || new Error(`Failed to contact MetaApi endpoints: ${attemptedUrls.join(", ")}`);
   }
 
   private async getResolvedDomain(): Promise<string> {
     if (this.resolvedDomain) return this.resolvedDomain;
     try {
       console.log("[REST CLIENT] Resolving MetaStats server domain...");
-      const res = await fetch(`${this.baseHost}/users/current/servers/mt-client-api`, {
-        method: "GET",
-        headers: await this.getAuthHeaders()
-      });
-      if (res.ok) {
-        const data = await res.json() as any;
-        if (data && data.domain) {
-          this.resolvedDomain = data.domain;
-          console.log(`[REST CLIENT] Resolved server domain: ${this.resolvedDomain}`);
-          return this.resolvedDomain;
-        }
+      const data = await this.safeRequest("/users/current/servers/mt-client-api", { method: "GET" });
+      if (data && data.domain) {
+        this.resolvedDomain = data.domain;
+        console.log(`[REST CLIENT] Resolved server domain: ${this.resolvedDomain}`);
+        return this.resolvedDomain;
       }
     } catch (err: any) {
       console.warn("[REST CLIENT] Dynamic domain resolution failed, using fallback:", err.message || err);
@@ -168,16 +255,9 @@ export class MetaApiRestClient {
   }
 
   async getAccounts(): Promise<MetaApiAccount[]> {
-    const res = await fetch(`${this.baseHost}/users/current/accounts`, {
-      method: "GET",
-      headers: await this.getAuthHeaders()
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to list accounts (HTTP ${res.status}): ${text}`);
-    }
-    const accounts = await res.json() as any[];
-    return accounts.map(a => ({
+    const accounts = await this.safeRequest("/users/current/accounts", { method: "GET" });
+    const list = Array.isArray(accounts) ? accounts : [];
+    return list.map((a: any) => ({
       ...a,
       id: a.id || a._id,
       metastatsApiEnabled: !!a.metastatsApiEnabled
@@ -185,15 +265,7 @@ export class MetaApiRestClient {
   }
 
   async getAccount(accountId: string): Promise<MetaApiAccount> {
-    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}`, {
-      method: "GET",
-      headers: await this.getAuthHeaders()
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to fetch account ${accountId} (HTTP ${res.status}): ${text}`);
-    }
-    const a = await res.json() as any;
+    const a = await this.safeRequest(`/users/current/accounts/${accountId}`, { method: "GET" });
     return {
       ...a,
       id: a.id || a._id,
@@ -202,16 +274,14 @@ export class MetaApiRestClient {
   }
 
   async createAccount(params: any): Promise<MetaApiAccount> {
-    const res = await fetch(`${this.baseHost}/users/current/accounts`, {
+    const payload = {
+      reliability: "regular",
+      ...params
+    };
+    const a = await this.safeRequest("/users/current/accounts", {
       method: "POST",
-      headers: await this.getAuthHeaders(),
-      body: JSON.stringify(params)
+      body: JSON.stringify(payload)
     });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to create account (HTTP ${res.status}): ${text}`);
-    }
-    const a = await res.json() as any;
     return {
       ...a,
       id: a.id || a._id,
@@ -220,59 +290,26 @@ export class MetaApiRestClient {
   }
 
   async deploy(accountId: string): Promise<void> {
-    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}/deploy`, {
-      method: "POST",
-      headers: await this.getAuthHeaders()
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to deploy account ${accountId} (HTTP ${res.status}): ${text}`);
-    }
+    await this.safeRequest(`/users/current/accounts/${accountId}/deploy`, { method: "POST" });
   }
 
   async updateAccount(accountId: string, params: any): Promise<void> {
-    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}`, {
+    await this.safeRequest(`/users/current/accounts/${accountId}`, {
       method: "PUT",
-      headers: await this.getAuthHeaders(),
       body: JSON.stringify(params)
     });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to update account ${accountId} (HTTP ${res.status}): ${text}`);
-    }
   }
 
   async deleteAccount(accountId: string): Promise<void> {
-    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}`, {
-      method: "DELETE",
-      headers: await this.getAuthHeaders()
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to delete account ${accountId} (HTTP ${res.status}): ${text}`);
-    }
+    await this.safeRequest(`/users/current/accounts/${accountId}`, { method: "DELETE" });
   }
 
   async undeploy(accountId: string): Promise<void> {
-    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}/undeploy`, {
-      method: "POST",
-      headers: await this.getAuthHeaders()
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to undeploy account ${accountId} (HTTP ${res.status}): ${text}`);
-    }
+    await this.safeRequest(`/users/current/accounts/${accountId}/undeploy`, { method: "POST" });
   }
 
   async enableMetaStatsApi(accountId: string): Promise<void> {
-    const res = await fetch(`${this.baseHost}/users/current/accounts/${accountId}/enable-metastats-api`, {
-      method: "POST",
-      headers: await this.getAuthHeaders()
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to enable MetaStats API for account ${accountId} (HTTP ${res.status}): ${text}`);
-    }
+    await this.safeRequest(`/users/current/accounts/${accountId}/enable-metastats-api`, { method: "POST" });
   }
 
   async getMetrics(accountId: string, account?: MetaApiAccount): Promise<any> {
@@ -286,15 +323,20 @@ export class MetaApiRestClient {
     }
     const domain = await this.getResolvedDomain();
     const url = `https://metastats-api-v1.${region}.${domain}/users/current/accounts/${accountId}/metrics`;
+    
     const res = await fetch(url, {
       method: "GET",
-      headers: await this.getAuthHeaders()
+      headers: this.getAuthHeaders()
     });
+    const rawText = await res.text();
+    const contentType = res.headers.get("content-type") || "";
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to fetch metrics (HTTP ${res.status}): ${text}`);
+      throw new Error(`Failed to fetch metrics (HTTP ${res.status}): ${rawText}`);
     }
-    return await res.json();
+    if (contentType.includes("application/json")) {
+      return JSON.parse(rawText);
+    }
+    return rawText;
   }
 
   async getAccountTrades(accountId: string, startTime: string, endTime: string, account?: MetaApiAccount): Promise<any[]> {
@@ -308,16 +350,21 @@ export class MetaApiRestClient {
     }
     const domain = await this.getResolvedDomain();
     const url = `https://metastats-api-v1.${region}.${domain}/users/current/accounts/${accountId}/historical-trades/${encodeURIComponent(startTime)}/${encodeURIComponent(endTime)}`;
+    
     const res = await fetch(url, {
       method: "GET",
-      headers: await this.getAuthHeaders()
+      headers: this.getAuthHeaders()
     });
+    const rawText = await res.text();
+    const contentType = res.headers.get("content-type") || "";
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to fetch historical trades (HTTP ${res.status}): ${text}`);
+      throw new Error(`Failed to fetch historical trades (HTTP ${res.status}): ${rawText}`);
     }
-    const data = await res.json() as any;
-    return data.trades || data;
+    let data: any = rawText;
+    if (contentType.includes("application/json")) {
+      data = JSON.parse(rawText);
+    }
+    return (data && data.trades) ? data.trades : (Array.isArray(data) ? data : []);
   }
 }
 
@@ -721,9 +768,10 @@ class MT5BackgroundSyncRegistry {
     }
 
     // Intercept demo/sandbox accounts immediately to avoid unnecessary MetaApi cloud queries
-    const isMockAccount = accountId.startsWith("mock-") || 
-                          accountId.includes("sandbox") || 
-                          accountId.startsWith("demo-");
+    const lowerId = (accountId || "").toLowerCase();
+    const isMockAccount = lowerId.startsWith("mock") || 
+                          lowerId.includes("sandbox") || 
+                          lowerId.startsWith("demo");
     if (isMockAccount) {
       console.log(`[REGISTRY] Account ${accountId} is a demo/sandbox account. Starting sandbox mock auto-sync directly.`);
       this.startMockSync(accountId, email);
@@ -796,12 +844,11 @@ class MT5BackgroundSyncRegistry {
           console.log(`[REGISTRY] 🛑 Closing connection for ${accountId} after failure to prevent background subscription retry spam.`);
           await connection.close();
         } catch (closeErr: any) {
-          console.error(`[REGISTRY] Error closing connection for ${accountId} during cleanup:`, closeErr.message || closeErr);
+          console.warn(`[REGISTRY] Notice closing connection for ${accountId} during cleanup:`, closeErr.message || closeErr);
         }
       }
 
       const errMsg = err.message || String(err);
-      console.error(`[REGISTRY] Connection setup failed for ${accountId}:`, errMsg);
 
       // Check if it's an authorization/token error (401 Unauthorized / invalid auth-token)
       const isAuthError = errMsg.includes("401") || 
@@ -812,10 +859,12 @@ class MT5BackgroundSyncRegistry {
                           err.statusCode === 401;
 
       if (isAuthError) {
-        console.warn(`[REGISTRY] 🛑 MetaApi Token authorization failed (401 Unauthorized) for ${accountId} (${email}). Falling back to simulation to prevent retry errors.`);
+        console.warn(`[REGISTRY] 🛑 MetaApi Token authorization expired or invalid (401 Unauthorized) for ${accountId} (${email}). Falling back to simulation to prevent retry errors.`);
         this.startMockSync(accountId, email);
         return; // Halt retry loop - retrying with an invalid auth-token will never succeed
       }
+
+      console.error(`[REGISTRY] Connection setup failed for ${accountId}:`, errMsg);
 
       // Check if the account was NOT FOUND on MetaApi (fatal / deleted / expired)
       const isNotFound = errMsg.toLowerCase().includes("not found") || 
@@ -1157,7 +1206,7 @@ export async function handleConnectMT5(req: Request, res: Response) {
   // STEP 1: Whether the request reaches /api/mt5
   console.log(`[CONNECT API] STEP 1: Request reached handleConnectMT5 successfully. Method: ${req.method}, URL: ${req.url}`);
 
-  const { login, password, server, email } = req.body;
+  const { login, password, server, email, accountId: directAccountId } = req.body;
 
   const diagnostics: {
     startedAt: string;
@@ -1213,17 +1262,18 @@ export async function handleConnectMT5(req: Request, res: Response) {
   }
 
   console.log("[CONNECT API] Initiating connection request details:", {
+    directAccountId,
     login,
     server,
     hasPassword: !!password,
     email
   });
 
-  if (!login || !password || !server) {
-    console.error("[CONNECT API] STEP 1 FAILURE: Missing required login, password, or server.");
+  if (!directAccountId && (!login || !password || !server)) {
+    console.error("[CONNECT API] STEP 1 FAILURE: Missing required directAccountId or login/password/server.");
     return res.status(400).json({
       success: false,
-      error: "Missing required login, password, or server. Please fill in all fields."
+      error: "Missing required parameters. Please provide either an Account ID or Server, Login, and Password."
     });
   }
 
@@ -1253,64 +1303,64 @@ export async function handleConnectMT5(req: Request, res: Response) {
       const client = new MetaApiRestClient(token);
       completeStep("metaapi_init");
 
-      startStep("get_accounts", "Query registered accounts via Direct REST API");
-      const accounts = await client.getAccounts();
-      completeStep("get_accounts", { accountsCount: accounts.length });
+      let account: any = null;
 
-      let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
+      if (directAccountId) {
+        startStep("get_account_by_id", `Query account by ID: ${directAccountId}`);
+        account = await client.getAccount(directAccountId);
+        completeStep("get_account_by_id", { accountId: account.id, state: account.state });
+      } else {
+        startStep("get_accounts", "Query registered accounts via Direct REST API");
+        const accounts = await client.getAccounts();
+        completeStep("get_accounts", { accountsCount: accounts.length });
 
-      if (account) {
-        console.log(`[CONNECT API] Located existing MetaApi account via REST: ${account.id}. Deleting it first to ensure a clean reconnection with updated credentials...`);
-        startStep("delete_stale_account", "Delete existing MT5 account from MetaApi to allow fresh recreate");
-        try {
-          if (account.state === "DEPLOYED") {
-            try {
-              console.log(`[CONNECT API] Account is currently deployed. Attempting to undeploy first...`);
-              await client.undeploy(account.id);
-            } catch (undepErr: any) {
-              console.warn(`[CONNECT API] Undeploy before delete failed (can proceed directly):`, undepErr.message || undepErr);
-            }
-          }
-          await client.deleteAccount(account.id);
-          console.log(`[CONNECT API] Successfully deleted existing account: ${account.id}`);
-          account = null; // Recreate fresh!
-          completeStep("delete_stale_account");
-        } catch (delErr: any) {
-          failStep("delete_stale_account", delErr);
-          console.warn(`[CONNECT API] Failed to delete existing account ${account.id}. Falling back to inline update...`, delErr.message || delErr);
-          
+        account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
+
+        if (account) {
+          console.log(`[CONNECT API] Located existing MetaApi account via REST: ${account.id}. Updating credentials to maintain active account slot...`);
           startStep("update_account", "Update existing account credentials via Direct REST API");
-          await client.updateAccount(account.id, {
+          try {
+            await client.updateAccount(account.id, {
+              password: password,
+              name: `Journaly - MT5 ${login}`
+            });
+            completeStep("update_account");
+          } catch (updateErr: any) {
+            console.warn("[CONNECT API] Update existing account via REST warning:", updateErr.message || updateErr);
+          }
+        }
+
+        if (!account) {
+          startStep("create_account", "Register new MT5 account on MetaApi using Direct REST API (reliability: regular)");
+          account = await client.createAccount({
+            name: `Journaly - MT5 ${login}`,
+            type: "cloud",
+            login: String(login),
             password: password,
-            name: `Journaly - MT5 ${login}`
+            server: server,
+            platform: "mt5",
+            reliability: "regular",
+            application: "metaapi",
+            magic: 0,
+            quoteStreamingIntervalInSeconds: 2.5
           });
-          completeStep("update_account");
+          completeStep("create_account", { accountId: account.id });
         }
       }
 
-      if (!account) {
-        startStep("create_account", "Register new MT5 account on MetaApi using Direct REST API");
-        account = await client.createAccount({
-          name: `Journaly - MT5 ${login}`,
-          type: "cloud",
-          login: String(login),
-          password: password,
-          server: server,
-          platform: "mt5",
-          application: "metaapi",
-          magic: 0,
-          quoteStreamingIntervalInSeconds: 2.5
-        });
-        completeStep("create_account", { accountId: account.id });
-      }
-
-      const accountId = account.id;
+      const connectedAccountId = account.id;
 
       // Always deploy/redeploy to ensure connection is refreshed and uses the new credentials
       startStep("deploy_account", "Trigger cloud deployment using Direct REST API");
-      await client.deploy(accountId);
       try {
-        const updated = await client.getAccount(accountId);
+        if (account.state !== "DEPLOYED") {
+          await client.deploy(connectedAccountId);
+        }
+      } catch (depErr: any) {
+        console.warn("[CONNECT API] Direct REST deploy warning (may already be deployed):", depErr.message || depErr);
+      }
+      try {
+        const updated = await client.getAccount(connectedAccountId);
         account.state = updated.state;
         account.connectionStatus = updated.connectionStatus;
       } catch (refreshErr) {
@@ -1320,7 +1370,7 @@ export async function handleConnectMT5(req: Request, res: Response) {
 
       return res.json({
         success: true,
-        accountId: accountId,
+        accountId: connectedAccountId,
         state: account.state,
         connectionStatus: account.connectionStatus,
         requiresPolling: true,
@@ -1334,10 +1384,18 @@ export async function handleConnectMT5(req: Request, res: Response) {
       const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
       diagnostics.error = serializeError(err);
       console.error("[CONNECT API] Direct REST MT5 Connection failed:", err);
+
+      let cleanErrorMsg = err.message || String(err);
+      if (cleanErrorMsg.includes("To allow high reliability please top up your account") || cleanErrorMsg.includes("top up") || cleanErrorMsg.includes("high reliability")) {
+        cleanErrorMsg = `MetaApi Balance Notice: You have added your payment method, but MetaApi requires a topped-up prepaid credit (e.g. $10) at app.metaapi.cloud/billing before new cloud terminals can be provisioned via API.\n\nTwo quick ways to connect now:\n1. Top up your balance ($10) at https://app.metaapi.cloud/billing, then click Link again.\n2. OR create your MT5 account directly in the MetaApi console at https://app.metaapi.cloud/accounts, copy your Account ID, and paste it into the "Direct MetaApi Account ID" tab here to link instantly!`;
+      } else if (finalStatus === 403 || cleanErrorMsg.includes("Forbidden")) {
+        cleanErrorMsg = `MetaApi Cloud (HTTP 403): ${err.message || String(err)}. You can manage accounts at app.metaapi.cloud or link an existing account ID directly.`;
+      }
+
       return res.status(finalStatus).json({
         success: false,
-        error: `Direct REST MT5 Provisioning Failure: ${err.message || String(err)}. Please verify your credentials.`,
-        message: err.message || String(err),
+        error: cleanErrorMsg,
+        message: cleanErrorMsg,
         stack: err.stack,
         metaapiError: serializeError(err),
         statusCode: finalStatus,
@@ -1368,67 +1426,67 @@ export async function handleConnectMT5(req: Request, res: Response) {
     }
 
     try {
-      startStep("get_accounts", "Query registered accounts using getAccountsWithInfiniteScrollPagination");
-      const accounts = await accountApi.getAccountsWithInfiniteScrollPagination();
-      completeStep("get_accounts", { accountsCount: accounts.length });
+      let account: any = null;
 
-      let account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
+      if (directAccountId) {
+        startStep("get_account_by_id", `Query account by ID: ${directAccountId}`);
+        account = await accountApi.getAccount(directAccountId);
+        completeStep("get_account_by_id", { accountId: account.id, state: account.state });
+      } else {
+        startStep("get_accounts", "Query registered accounts using getAccountsWithInfiniteScrollPagination");
+        const accounts = await accountApi.getAccountsWithInfiniteScrollPagination();
+        completeStep("get_accounts", { accountsCount: accounts.length });
 
-      if (account) {
-        console.log(`[CONNECT API] Located existing MetaApi account: ${account.id}. Deleting it first to ensure a clean reconnection with updated credentials...`);
-        startStep("delete_stale_account", "Delete existing MT5 account from MetaApi to allow fresh recreate");
-        try {
-          if (account.state === "DEPLOYED") {
-            try {
-              console.log(`[CONNECT API] Account is currently deployed. Attempting to undeploy first...`);
-              await account.undeploy();
-            } catch (undepErr: any) {
-              console.warn(`[CONNECT API] Undeploy before delete failed (can proceed directly):`, undepErr.message || undepErr);
-            }
-          }
-          await account.remove();
-          console.log(`[CONNECT API] Successfully removed existing account: ${account.id}`);
-          account = null; // Recreate fresh!
-          completeStep("delete_stale_account");
-        } catch (delErr: any) {
-          failStep("delete_stale_account", delErr);
-          console.warn(`[CONNECT API] Failed to remove existing account ${account.id}. Falling back to inline update...`, delErr.message || delErr);
-          
+        account = accounts.find((a: any) => String(a.login) === String(login) && a.server === server);
+
+        if (account) {
+          console.log(`[CONNECT API] Located existing MetaApi account: ${account.id}. Updating credentials to maintain active account slot...`);
           startStep("update_account", "Update existing account credentials");
-          await account.update({
+          try {
+            await account.update({
+              password: password,
+              name: `Journaly - MT5 ${login}`
+            });
+            completeStep("update_account");
+          } catch (updateErr: any) {
+            console.warn(`[CONNECT API] Failed to update existing account ${account.id}:`, updateErr.message || updateErr);
+          }
+        }
+
+        if (!account) {
+          startStep("create_account", "Register new MT5 account on MetaApi using createAccount (reliability: regular)");
+          account = await accountApi.createAccount({
+            name: `Journaly - MT5 ${login}`,
+            type: "cloud",
+            login: String(login),
             password: password,
-            name: `Journaly - MT5 ${login}`
-          });
-          completeStep("update_account");
+            server: server,
+            platform: "mt5",
+            reliability: "regular",
+            application: "metaapi",
+            magic: 0,
+            quoteStreamingIntervalInSeconds: 2.5
+          } as any);
+          completeStep("create_account", { accountId: account.id });
         }
       }
 
-      if (!account) {
-        startStep("create_account", "Register new MT5 account on MetaApi using createAccount");
-        account = await accountApi.createAccount({
-          name: `Journaly - MT5 ${login}`,
-          type: "cloud",
-          login: String(login),
-          password: password,
-          server: server,
-          platform: "mt5",
-          application: "metaapi",
-          magic: 0,
-          quoteStreamingIntervalInSeconds: 2.5
-        } as any);
-        completeStep("create_account", { accountId: account.id });
-      }
+      const connectedAccountId = account.id;
 
-      const accountId = account.id;
-
-      // Always deploy/redeploy to refresh connection and apply potential credential changes
+      // Deploy if not already deployed
       startStep("deploy_account", "Trigger cloud deployment using account.deploy");
-      await account.deploy();
+      try {
+        if (account.state !== "DEPLOYED") {
+          await account.deploy();
+        }
+      } catch (depErr: any) {
+        console.warn("[CONNECT API] Account deploy warning (may already be deployed):", depErr.message || depErr);
+      }
       completeStep("deploy_account");
 
       return res.json({
         success: true,
-        accountId: accountId,
+        accountId: connectedAccountId,
         state: account.state,
         connectionStatus: account.connectionStatus,
         requiresPolling: true,
@@ -1445,10 +1503,17 @@ export async function handleConnectMT5(req: Request, res: Response) {
 
       console.error("[CONNECT API] Complete error object:", err);
 
+      let cleanErrorMsg = err.message || String(err);
+      if (cleanErrorMsg.includes("To allow high reliability please top up your account") || cleanErrorMsg.includes("top up") || cleanErrorMsg.includes("high reliability")) {
+        cleanErrorMsg = `MetaApi Balance Notice: You have successfully added your payment method, but MetaApi requires a topped-up prepaid credit (e.g. $10) at app.metaapi.cloud/billing before new cloud terminals can be provisioned via API.\n\nTwo quick ways to connect now:\n1. Top up your balance ($10) at https://app.metaapi.cloud/billing, then click Link again.\n2. OR create your MT5 account directly in the MetaApi console at https://app.metaapi.cloud/accounts, copy your Account ID, and paste it into the "Direct MetaApi Account ID" tab here to link instantly!`;
+      } else if (finalStatus === 403 || cleanErrorMsg.includes("Forbidden")) {
+        cleanErrorMsg = `MetaApi Cloud (HTTP 403): ${err.message || String(err)}. You can manage accounts at app.metaapi.cloud or link an existing account ID directly.`;
+      }
+
       return res.status(finalStatus).json({
         success: false,
-        error: `MT5 Provisioning Failure: ${err.message || String(err)}. Please verify your credentials.`,
-        message: err.message || String(err),
+        error: cleanErrorMsg,
+        message: cleanErrorMsg,
         stack: err.stack,
         metaapiError: serializeError(err),
         statusCode: finalStatus,

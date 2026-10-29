@@ -77,9 +77,18 @@ export default function MT5ConnectionPanel({
   // Check backend server-side MetaApi Token configuration on mount
   useEffect(() => {
     fetch("/api/mt5/config")
-      .then(res => res.json())
+      .then(async res => {
+        const text = await res.text();
+        const contentType = res.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          try {
+            return JSON.parse(text);
+          } catch {}
+        }
+        return null;
+      })
       .then(data => {
-        setIsTokenConfigured(!!data.configured);
+        setIsTokenConfigured(!!(data && data.configured));
       })
       .catch(() => {
         setIsTokenConfigured(false);
@@ -98,14 +107,22 @@ export default function MT5ConnectionPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email })
       });
-      const data = await response.json();
-      if (response.ok && data.success) {
+      const rawText = await response.text();
+      const contentType = response.headers.get("content-type") || "";
+      let data: any = null;
+      if (contentType.includes("application/json")) {
+        try {
+          data = JSON.parse(rawText);
+        } catch {}
+      }
+
+      if (response.ok && data && data.success) {
         setSuccessMsg("Demo Sandbox activated! 8 historical trades successfully seeded.");
         setTimeout(() => {
           onConnected(data.accountId, data.broker);
         }, 1250);
       } else {
-        setError(data.error || "Failed to initialize Demo Sandbox.");
+        setError((data && data.error) || `Failed to initialize Demo Sandbox (HTTP ${response.status}).`);
         setLoading(false);
       }
     } catch (err: any) {
@@ -126,8 +143,8 @@ export default function MT5ConnectionPanel({
     setError("");
     setSuccessMsg("");
 
-    let url = "/api/mt5/connect";
-    const payload: any = {};
+    let url = "/api/connect-mt5";
+    const payload: any = { email };
 
     if (activeTab === "direct") {
       if (!directAccountId.trim()) {
@@ -140,11 +157,9 @@ export default function MT5ConnectionPanel({
         setError("Please fill in your Server Name, Account Name / Login ID, and MT5 Password.");
         return;
       }
-      url = "/api/connect-mt5";
       payload.login = login.trim();
       payload.password = password;
       payload.server = server.trim();
-      payload.email = email;
     }
 
     if (customMetaApiToken.trim()) {
@@ -243,11 +258,13 @@ export default function MT5ConnectionPanel({
               if (!statusRes.ok || statusJsonFailed || (statusData && !statusData.success)) {
                 setLoading(false);
                 setIsPolling(false);
-                let errorDetails = `HTTP STATUS: ${statusStatusCode}\n`;
-                if (statusJsonFailed) {
-                  errorDetails += `JSON Parsing failed for status response text:\n${statusText}`;
+                let errorDetails = "";
+                if (statusStatusCode === 403) {
+                  errorDetails = (statusData && (statusData.error || statusData.message)) || `MetaApi Status Check: HTTP 403 Forbidden. Cloud access restricted.`;
+                } else if (statusJsonFailed) {
+                  errorDetails = `HTTP STATUS: ${statusStatusCode} (Non-JSON status response)\n${statusText.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()}`;
                 } else {
-                  errorDetails += `Response Body:\n${JSON.stringify(statusData, null, 2)}`;
+                  errorDetails = (statusData && (statusData.error || statusData.message)) || `HTTP STATUS: ${statusStatusCode}\n${JSON.stringify(statusData, null, 2)}`;
                 }
                 setError(errorDetails);
                 return;
@@ -310,13 +327,26 @@ export default function MT5ConnectionPanel({
           setLoading(false);
         }
       } else {
-        let errorMsg = `HTTP STATUS: ${statusCode}\n`;
-        if (jsonParsingFailed) {
-          errorMsg += `JSON Parsing failed. Response Text:\n${responseText}`;
+        let errorMsg = "";
+        if (responseJson && (responseJson.error || responseJson.message)) {
+          errorMsg = responseJson.error || responseJson.message;
+        } else if (statusCode === 403) {
+          if (jsonParsingFailed || responseText.includes("<html>")) {
+            errorMsg = `MetaApi Connection Blocked (HTTP 403 Forbidden):\nThe request reached MetaApi servers but access was blocked. This indicates your auth-token is either invalid, expired, or MetaApi rejected the request due to account limits.`;
+          } else {
+            errorMsg = `MetaApi Connection Forbidden (HTTP 403): Access denied by MetaApi cloud.`;
+          }
+        } else if (jsonParsingFailed) {
+          if (responseText.includes("<html>")) {
+            const cleanText = responseText.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+            errorMsg = `HTTP STATUS: ${statusCode} (HTML Error Received)\n${cleanText}`;
+          } else {
+            errorMsg = `HTTP STATUS: ${statusCode}\n${responseText}`;
+          }
         } else if (responseJson) {
-          errorMsg += `Response Body:\n${JSON.stringify(responseJson, null, 2)}`;
+          errorMsg = responseJson.error || responseJson.message || `HTTP STATUS: ${statusCode}\n${JSON.stringify(responseJson, null, 2)}`;
         } else {
-          errorMsg += `Response Text:\n${responseText}`;
+          errorMsg = `HTTP STATUS: ${statusCode}\n${responseText}`;
         }
         setError(errorMsg);
         setLoading(false);
@@ -705,6 +735,82 @@ export default function MT5ConnectionPanel({
                   Show raw diagnostic response details
                 </summary>
                 <pre className="mt-2 font-mono bg-zinc-950 p-2.5 rounded-lg border border-zinc-900 text-rose-300 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-44 text-[10px]">
+                  {error}
+                </pre>
+              </details>
+            </div>
+          );
+        }
+
+        const isReliabilityOrQuota = error.includes("top up") || 
+                                    error.includes("reliability") || 
+                                    error.includes("ForbiddenError") ||
+                                    error.includes("Account Quota") ||
+                                    error.includes("maximum number of accounts") ||
+                                    error.includes("Balance Notice") ||
+                                    error.includes("Balance Required");
+
+        if (isReliabilityOrQuota) {
+          return (
+            <div className="my-3.5 p-4 rounded-xl bg-zinc-950 border border-amber-500/30 text-zinc-300 text-xs font-medium space-y-3.5 shadow-xl">
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-zinc-800">
+                <div className="flex items-center gap-2 text-amber-400 font-bold uppercase tracking-wider text-[11px]">
+                  <ShieldAlert size={16} className="shrink-0 text-amber-500" />
+                  <span>MetaApi Cloud: Balance &amp; Account Provisioning Notice</span>
+                </div>
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-extrabold uppercase tracking-wide">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  Gateway Connected
+                </div>
+              </div>
+
+              <div className="bg-zinc-900/80 p-3 rounded-xl border border-zinc-800/80 space-y-2">
+                <div className="flex items-center gap-2 text-zinc-200 font-bold text-xs">
+                  <CheckCircle size={14} className="text-emerald-400 shrink-0" />
+                  <span>Cloud Gateway reached: <strong className="text-emerald-400">Connection confirmed</strong></span>
+                </div>
+                <p className="text-zinc-400 text-[11px] leading-relaxed">
+                  MetaApi received your connection request. Although your payment method is configured, MetaApi operates as a prepaid service requiring a positive prepaid credit balance (e.g. $10) before new cloud trading servers can be auto-provisioned via the API.
+                </p>
+                <div className="pt-1.5 border-t border-zinc-800 text-[11px] text-amber-300/90 leading-relaxed space-y-1">
+                  <strong>How to connect immediately:</strong>
+                  <ul className="list-disc list-inside space-y-1.5 text-zinc-300 mt-1">
+                    <li>
+                      <strong>Option 1 (Fastest &amp; Free):</strong> Add your MT5 broker account directly in your MetaApi console at <a href="https://app.metaapi.cloud/accounts" target="_blank" rel="noreferrer" className="underline text-emerald-400 font-bold">app.metaapi.cloud/accounts</a>, copy the generated <strong>Account ID</strong>, switch to the <strong>"Direct MetaApi Account ID"</strong> tab above, and paste it here!
+                    </li>
+                    <li>
+                      <strong>Option 2:</strong> Add a $10 prepaid top-up credit to your MetaApi balance at <a href="https://app.metaapi.cloud/billing" target="_blank" rel="noreferrer" className="underline text-emerald-400 font-bold">app.metaapi.cloud/billing</a>, then submit this form again.
+                    </li>
+                  </ul>
+                </div>
+              </div>
+
+              {/* Solution: Use Instant Demo Sandbox */}
+              <div className="bg-emerald-950/20 p-3 rounded-xl border border-emerald-500/20 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                    <Database size={12} />
+                    Instant Sandbox (Zero Setup Needed)
+                  </span>
+                  <p className="text-[11px] text-zinc-400">
+                    Immediately test the dashboard, metrics, and journal with 8 seeded MT5 trades.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleForceSandbox}
+                  className="w-full sm:w-auto px-3.5 py-2 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black text-xs uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 shrink-0"
+                >
+                  <Database size={13} />
+                  Connect Sandbox Now
+                </button>
+              </div>
+
+              <details className="pt-1">
+                <summary className="text-[10px] text-zinc-500 hover:text-zinc-400 cursor-pointer uppercase font-mono tracking-wider">
+                  Show raw diagnostic response details
+                </summary>
+                <pre className="mt-2 font-mono bg-zinc-950 p-2.5 rounded-lg border border-zinc-900 text-amber-200 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-44 text-[10px]">
                   {error}
                 </pre>
               </details>

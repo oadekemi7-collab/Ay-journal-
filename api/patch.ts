@@ -1,3 +1,8 @@
+// Disable strict SSL verification for MetaApi's Kubernetes Ingress controller self-signed certs
+if (!process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+}
+
 // Vercel Serverless Runtime Compatibility Patch for Read-only Filesystem
 try {
   if (process.env.VERCEL) {

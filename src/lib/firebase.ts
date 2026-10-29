@@ -113,8 +113,7 @@ export async function getTradesForUser(email: string): Promise<Trade[]> {
   try {
     const q = query(
       collection(db, collectionPath),
-      where('email', '==', email.toLowerCase()),
-      orderBy('createdAt', 'desc')
+      where('email', '==', email.toLowerCase())
     );
     const snapshot = await getDocs(q);
     const trades: Trade[] = [];
@@ -134,14 +133,18 @@ export async function getTradesForUser(email: string): Promise<Trade[]> {
         volume: data.volume !== undefined ? Number(data.volume) : undefined,
         commission: data.commission !== undefined ? Number(data.commission) : undefined,
         swap: data.swap !== undefined ? Number(data.swap) : undefined,
+        createdAt: data.createdAt,
       });
+    });
+    // In-memory sort by date / createdAt descending to avoid composite index requirement
+    trades.sort((a: any, b: any) => {
+      const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : new Date(a.date || 0).getTime();
+      const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : new Date(b.date || 0).getTime();
+      return timeB - timeA;
     });
     return trades;
   } catch (error: any) {
-    if (error?.code === 'permission-denied' || error?.message?.includes('permission') || error?.message?.includes('Permission')) {
-      handleFirestoreError(error, OperationType.LIST, collectionPath);
-    }
-    console.error('Error fetching trades from Firestore:', error);
+    console.warn('Notice fetching trades from Firestore:', error?.message || error);
     // Return empty array and fallback gracefully
     return [];
   }
@@ -536,8 +539,7 @@ export function subscribeToTradesForUser(email: string, callback: (trades: Trade
   const collectionPath = 'trades';
   const q = query(
     collection(db, collectionPath),
-    where('email', '==', email.toLowerCase()),
-    orderBy('createdAt', 'desc')
+    where('email', '==', email.toLowerCase())
   );
   
   return onSnapshot(q, (snapshot) => {
@@ -558,14 +560,18 @@ export function subscribeToTradesForUser(email: string, callback: (trades: Trade
         volume: data.volume !== undefined ? Number(data.volume) : undefined,
         commission: data.commission !== undefined ? Number(data.commission) : undefined,
         swap: data.swap !== undefined ? Number(data.swap) : undefined,
+        createdAt: data.createdAt,
       });
+    });
+    // In-memory sort by date / createdAt descending
+    trades.sort((a: any, b: any) => {
+      const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : new Date(a.date || 0).getTime();
+      const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : new Date(b.date || 0).getTime();
+      return timeB - timeA;
     });
     callback(trades);
   }, (error) => {
-    console.error('Error in onSnapshot for trades:', error);
-    if (error?.code === 'permission-denied' || error?.message?.includes('permission')) {
-      handleFirestoreError(error, OperationType.GET, collectionPath);
-    }
+    console.warn('Notice in onSnapshot for trades:', error?.message || error);
   });
 }
 

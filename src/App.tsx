@@ -198,13 +198,23 @@ export default function App() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ reference, email: user.email })
           });
-          const data = await res.json();
-          if (data.success) {
+          const rawText = await res.text();
+          const contentType = res.headers.get('content-type') || '';
+          let data: any = null;
+          if (contentType.includes('application/json')) {
+            try {
+              data = JSON.parse(rawText);
+            } catch (jsonErr) {
+              console.warn('[PAYSTACK VERIFY] Failed to parse JSON response:', jsonErr);
+            }
+          }
+
+          if (res.ok && data && data.success) {
             setPaystackVerifySuccess(true);
             setUserPlan('premium');
             triggerNotification("Congratulations! Paystack subscription verified. Premium features unlocked!");
           } else {
-            setPaystackVerifyError(data.error || "Payment verification failed with the server.");
+            setPaystackVerifyError((data && data.error) || (res.status === 403 ? "Verification forbidden (HTTP 403)." : "Payment verification failed with the server."));
           }
         } catch (err: any) {
           console.error("Paystack verification error on client:", err);
@@ -343,8 +353,18 @@ export default function App() {
           ...(customMetaApiToken ? { metaApiToken: customMetaApiToken } : {})
         })
       });
-      const data = await response.json();
-      if (data.success) {
+      const rawText = await response.text();
+      const contentType = response.headers.get('content-type') || '';
+      let data: any = null;
+      if (contentType.includes('application/json')) {
+        try {
+          data = JSON.parse(rawText);
+        } catch (jsonErr) {
+          console.warn('[MT5 SYNC] Failed to parse JSON response:', jsonErr);
+        }
+      }
+
+      if (response.ok && data && data.success) {
         setMt5Balance(data.accountInfo.balance);
         setMt5Equity(data.accountInfo.equity);
         setMt5Broker(data.accountInfo.broker);
@@ -415,7 +435,7 @@ export default function App() {
 
       return () => clearInterval(interval);
     }
-  }, [user, userPlan, mt5Connected, mt5AccountId, trades.length]);
+  }, [user?.email, userPlan, mt5Connected, mt5AccountId]);
 
   // Sync Live UTC Clock (crucial for retail & institutional session tracking)
   useEffect(() => {

@@ -48,13 +48,20 @@ export async function handleInitializePaystack(req: Request, res: Response) {
       body: JSON.stringify(payload)
     });
 
-    const data: any = await paystackRes.json();
+    const rawText = await paystackRes.text();
+    const contentType = paystackRes.headers.get("content-type") || "";
+    let data: any = null;
+    if (contentType.includes("application/json")) {
+      try {
+        data = JSON.parse(rawText);
+      } catch {}
+    }
 
-    if (!paystackRes.ok || !data.status) {
-      console.error("[PAYSTACK INITIALIZE ERROR] Paystack response:", data);
+    if (!paystackRes.ok || !data || !data.status) {
+      console.error("[PAYSTACK INITIALIZE ERROR] Paystack response:", data || rawText);
       return res.status(400).json({
         success: false,
-        error: data.message || "Failed to initialize Paystack transaction. Please check your credentials."
+        error: (data && data.message) || (paystackRes.status === 403 ? "Paystack API access forbidden (HTTP 403)." : "Failed to initialize Paystack transaction. Please check your credentials.")
       });
     }
 
@@ -99,13 +106,20 @@ export async function handleVerifyPaystack(req: Request, res: Response) {
       }
     });
 
-    const data: any = await verifyRes.json();
+    const rawText = await verifyRes.text();
+    const contentType = verifyRes.headers.get("content-type") || "";
+    let data: any = null;
+    if (contentType.includes("application/json")) {
+      try {
+        data = JSON.parse(rawText);
+      } catch {}
+    }
 
-    if (!verifyRes.ok || !data.status) {
-      console.error("[PAYSTACK VERIFY ERROR] Verification request failed:", data);
+    if (!verifyRes.ok || !data || !data.status) {
+      console.error("[PAYSTACK VERIFY ERROR] Verification request failed:", data || rawText);
       return res.status(400).json({
         success: false,
-        error: data.message || "Failed to verify transaction with Paystack server."
+        error: (data && data.message) || (verifyRes.status === 403 ? "Paystack API access forbidden (HTTP 403)." : "Failed to verify transaction with Paystack server.")
       });
     }
 

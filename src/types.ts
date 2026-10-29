@@ -22,6 +22,7 @@ export interface Trade {
   volume?: number;
   commission?: number;
   swap?: number;
+  createdAt?: any;
 }
 
 export interface TradingStats {

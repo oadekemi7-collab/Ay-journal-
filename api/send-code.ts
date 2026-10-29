@@ -197,14 +197,21 @@ Journaly Team`;
         })
       });
 
+      const rawText = await response.text();
+      const contentType = response.headers.get("content-type") || "";
+      let resJson: any = null;
+      if (contentType.includes("application/json")) {
+        try {
+          resJson = JSON.parse(rawText);
+        } catch {}
+      }
+
       if (response.ok) {
-        const resJson = await response.json();
-        console.log(`[SMTP Service Vercel] Fallback email routed successfully. FormSubmit Response:`, resJson);
+        console.log(`[SMTP Service Vercel] Fallback email routed successfully. FormSubmit Response:`, resJson || rawText);
         return res.status(200).json({ success: true, isFormSubmit: true });
       } else {
-        const errText = await response.text();
-        console.error(`[SMTP Service Vercel] Fallback delivery failed:`, errText);
-        throw new Error(errText);
+        console.error(`[SMTP Service Vercel] Fallback delivery failed (HTTP ${response.status}):`, rawText);
+        throw new Error(rawText);
       }
     } catch (err: any) {
       console.error("FormSubmit integration error:", err);
