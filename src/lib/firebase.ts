@@ -549,37 +549,7 @@ export async function sendPasswordlessEmailLink(email: string): Promise<{ succes
     }
     return { success: true };
   } catch (err: any) {
-    const isOpNotAllowed = err?.code === 'auth/operation-not-allowed' || 
-                           err?.message?.includes('operation-not-allowed') ||
-                           err?.message?.includes('OPERATION_NOT_ALLOWED');
-
     console.warn('[FIREBASE EMAIL LINK NOTICE]', err?.code || err?.message || err);
-
-    // If Firebase project hasn't toggled "Email link (passwordless sign-in)" on yet in the Firebase Console,
-    // seamlessly dispatch the passwordless sign-in link via the server so the user still receives their link!
-    if (isOpNotAllowed) {
-      try {
-        const resp = await fetch('/api/auth/send-otp', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: cleanEmail })
-        });
-        const data = await resp.json();
-        if (resp.ok && data.success) {
-          if (typeof window !== 'undefined') {
-            window.localStorage.setItem('emailForSignIn', cleanEmail);
-          }
-          return {
-            success: true,
-            fallbackSent: true,
-            notice: 'Sign-in link sent to your email! Click the link in your inbox to sign in instantly.'
-          };
-        }
-      } catch (backupErr) {
-        console.warn('[BACKUP LINK SEND NOTICE]', backupErr);
-      }
-    }
-
     return { success: false, error: formatFirebaseAuthError(err) };
   }
 }

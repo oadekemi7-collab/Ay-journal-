@@ -128,10 +128,10 @@ async function sendAuthEmail(toEmail: string, code: string, magicLink: string) {
   const host = process.env.SMTP_HOST || "smtp.gmail.com";
   const port = parseInt(process.env.SMTP_PORT || "587", 10);
   const user = process.env.SMTP_USER || "toolaoilqbi@gmail.com";
-  const pass = process.env.SMTP_PASS || "zjzh milx advx ymom";
+  const pass = process.env.SMTP_PASS;
   const fromName = process.env.SMTP_FROM_NAME || "Journaly";
 
-  const subject = "Your Journaly Sign-In Link & Code";
+  const subject = "Your Journaly Sign-In Link";
 
   const htmlContent = `<!DOCTYPE html>
 <html>
@@ -197,44 +197,43 @@ Click here to sign in: ${magicLink}
 
 This link will expire in 15 minutes. No password required. If you did not request this, you can ignore this email.`;
 
-  try {
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      auth: { user, pass },
-      tls: { rejectUnauthorized: false }
-    });
-
-    await transporter.sendMail({
-      from: `"${fromName}" <${user}>`,
-      to: toEmail,
-      subject,
-      text: textContent,
-      html: htmlContent
-    });
-    console.log(`[AUTH OTP] Email successfully sent to ${toEmail}`);
-    return true;
-  } catch (smtpErr: any) {
-    console.warn(`[AUTH OTP] Primary SMTP error:`, smtpErr?.message || smtpErr);
-    // Fallback via FormSubmit
+  if (pass) {
     try {
-      await fetch(`https://formsubmit.co/ajax/${encodeURIComponent(toEmail)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({
-          _subject: subject,
-          "Sign-In Code": code,
-          "Sign-In Link": magicLink,
-          _captcha: "false"
-        })
+      const transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure: port === 465,
+        auth: { user, pass },
+        tls: { rejectUnauthorized: false }
       });
-      console.log(`[AUTH OTP] Fallback FormSubmit sent to ${toEmail}`);
+
+      await transporter.sendMail({
+        from: `"${fromName}" <${user}>`,
+        to: toEmail,
+        subject,
+        text: textContent,
+        html: htmlContent
+      });
       return true;
-    } catch (fbErr: any) {
-      console.error(`[AUTH OTP] FormSubmit fallback also failed:`, fbErr?.message || fbErr);
-      return false;
+    } catch {
+      // SMTP transport skipped or failed; fallback safely below
     }
+  }
+
+  // Safe fallback via FormSubmit if configured
+  try {
+    await fetch(`https://formsubmit.co/ajax/${encodeURIComponent(toEmail)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({
+        _subject: subject,
+        "Sign-In Link": magicLink,
+        _captcha: "false"
+      })
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 
