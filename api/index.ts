@@ -21,6 +21,13 @@ import {
   handleInitializePaystack, 
   handleVerifyPaystack 
 } from "./paystack";
+import {
+  handleRegister,
+  handleLogin,
+  handleLoginEmailMT5,
+  handleMe,
+  handleLogout
+} from "./auth";
 
 const app = express();
 app.use(express.json());
@@ -174,6 +181,66 @@ app.all("/api/paystack/verify", async (req: Request, res: Response, next: NextFu
     return await handleVerifyPaystack(req, res);
   } catch (err: any) {
     return handleException(err, "handleVerifyPaystack", res);
+  }
+});
+
+// 7. Auth: Register
+app.all("/api/auth/register", async (req: Request, res: Response) => {
+  if (req.method !== "POST") {
+    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
+  }
+  try {
+    return await handleRegister(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleRegister", res);
+  }
+});
+
+// 8. Auth: Login
+app.all("/api/auth/login", async (req: Request, res: Response) => {
+  if (req.method !== "POST") {
+    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
+  }
+  try {
+    return await handleLogin(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleLogin", res);
+  }
+});
+
+// 8b. Auth: Login with Email & MT5 Details
+app.all("/api/auth/login-email-mt5", async (req: Request, res: Response) => {
+  if (req.method !== "POST") {
+    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
+  }
+  try {
+    return await handleLoginEmailMT5(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleLoginEmailMT5", res);
+  }
+});
+
+// 9. Auth: Me
+app.all("/api/auth/me", async (req: Request, res: Response) => {
+  if (req.method !== "GET") {
+    return res.status(405).json({ success: false, error: "Method Not Allowed. Use GET." });
+  }
+  try {
+    return await handleMe(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleMe", res);
+  }
+});
+
+// 10. Auth: Logout
+app.all("/api/auth/logout", async (req: Request, res: Response) => {
+  if (req.method !== "POST") {
+    return res.status(405).json({ success: false, error: "Method Not Allowed. Use POST." });
+  }
+  try {
+    return await handleLogout(req, res);
+  } catch (err: any) {
+    return handleException(err, "handleLogout", res);
   }
 });
 

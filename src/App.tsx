@@ -42,7 +42,12 @@ import {
   getUserProfile,
   updateUserProfile,
   subscribeToTradesForUser,
-  subscribeToUserProfile
+  subscribeToUserProfile,
+  verifyCurrentSession,
+  auth,
+  onAuthStateChanged,
+  logOutUser,
+  migrateTradesUserId
 } from './lib/firebase';
 
 const generateDemoTrades = (): Trade[] => {
@@ -151,7 +156,7 @@ export default function App() {
     setTheme(prev => prev === 'light' ? 'dark' : 'light');
   };
 
-  const [user, setUser] = useState<{ email: string; name: string; avatar: string } | null>(() => {
+  const [user, setUser] = useState<{ uid?: string; email: string; name: string; avatar: string } | null>(() => {
     const saved = localStorage.getItem('tradezella_journal_user');
     try {
       return saved ? JSON.parse(saved) : null;
@@ -159,6 +164,54 @@ export default function App() {
       return null;
     }
   });
+
+  // Listen to real Firebase onAuthStateChanged across refreshes
+  useEffect(() => {
+    if (!auth) {
+      // Fallback: check session from localStorage
+      const saved = localStorage.getItem('tradezella_journal_user');
+      if (saved) {
+        try { setUser(JSON.parse(saved)); } catch {}
+      }
+      return;
+    }
+
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: any) => {
+      if (firebaseUser) {
+        const cleanEmail = firebaseUser.email || '';
+        const displayName = firebaseUser.displayName || cleanEmail.split('@')[0] || 'Trader';
+        const userData = {
+          uid: firebaseUser.uid,
+          email: cleanEmail,
+          name: displayName,
+          avatar: firebaseUser.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${firebaseUser.uid}&backgroundColor=10b981&textColor=09090b`
+        };
+        setUser(userData);
+        localStorage.setItem('tradezella_journal_user', JSON.stringify(userData));
+
+        // Auto-link legacy trades with this user ID
+        if (cleanEmail && firebaseUser.uid) {
+          migrateTradesUserId(cleanEmail, firebaseUser.uid).catch(() => {});
+        }
+      } else {
+        // If Firebase Auth confirms user is signed out, clear user state
+        const saved = localStorage.getItem('tradezella_journal_user');
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            // If parsed has no uid or matches legacy, keep temporarily or clear
+            setUser(parsed);
+          } catch {
+            setUser(null);
+          }
+        } else {
+          setUser(null);
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   const [trades, setTrades] = useState<Trade[]>([]);
   const [selectedDateFilter, setSelectedDateFilter] = useState<string | null>(null);
@@ -251,7 +304,7 @@ export default function App() {
     }
   };
 
-  // Initialize data from Firestore with real-time sync
+  // Initialize data from Firestore with real-time sync (private per user ID)
   useEffect(() => {
     if (!user) {
       setTrades([]);
@@ -261,39 +314,17 @@ export default function App() {
     
     setIsLoaded(false);
     
-    // Subscribe in real-time to secure Cloud Firestore trades
-    const unsubscribe = subscribeToTradesForUser(user.email, (fetchedTrades) => {
-      if (fetchedTrades.length > 0) {
-        setTrades(fetchedTrades);
-        setIsLoaded(true);
-        // Backup to local storage for offline resiliency
-        const storageKey = `tradezella_journal_trades_${user.email}`;
-        localStorage.setItem(storageKey, JSON.stringify(fetchedTrades));
-      } else {
-        // Fallback to offline localStorage partition if any exist raw
-        const storageKey = `tradezella_journal_trades_${user.email}`;
-        const saved = localStorage.getItem(storageKey);
-        if (saved) {
-          try {
-            const loadedTrades = JSON.parse(saved);
-            setTrades(loadedTrades);
-            // Proactively auto-migrate existing offline trades to cloud database
-            batchSaveTradesToFirestore(user.email, loadedTrades).catch(err => {
-              console.error('Migration backup error:', err);
-            });
-          } catch (err) {
-            console.error('Local copy read error:', err);
-            setTrades([]);
-          }
-        } else {
-          setTrades([]);
-        }
-        setIsLoaded(true);
-      }
+    // Subscribe in real-time to secure Cloud Firestore trades private to this user
+    const unsubscribe = subscribeToTradesForUser({ email: user.email, userId: user.uid }, (fetchedTrades) => {
+      setTrades(fetchedTrades);
+      setIsLoaded(true);
+      // Backup to local storage for offline resiliency
+      const storageKey = `tradezella_journal_trades_${user.uid || user.email}`;
+      localStorage.setItem(storageKey, JSON.stringify(fetchedTrades));
     });
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user?.uid, user?.email]);
 
   // Load and sync Premium Profile Details in real-time
   useEffect(() => {
@@ -665,10 +696,10 @@ export default function App() {
     };
 
     if (user) {
-      saveTradeToFirestore(user.email, newTrade).catch(err => {
+      saveTradeToFirestore(user.email, newTrade, user.uid).catch(err => {
         console.error('Error saving new trade to cloud:', err);
       });
-      const storageKey = `tradezella_journal_trades_${user.email}`;
+      const storageKey = `tradezella_journal_trades_${user.uid || user.email}`;
       localStorage.setItem(storageKey, JSON.stringify([newTrade, ...trades]));
     }
 
@@ -689,7 +720,7 @@ export default function App() {
     setTrades(updated);
 
     if (user) {
-      const storageKey = `tradezella_journal_trades_${user.email}`;
+      const storageKey = `tradezella_journal_trades_${user.uid || user.email}`;
       localStorage.setItem(storageKey, JSON.stringify(updated));
     }
 
@@ -698,30 +729,27 @@ export default function App() {
 
   // Edit trade
   const handleEditTrade = (updatedTrade: Trade) => {
+    const updated = trades.map((t) => (t.id === updatedTrade.id ? updatedTrade : t));
+
     if (user) {
-      saveTradeToFirestore(user.email, updatedTrade).catch(err => {
+      saveTradeToFirestore(user.email, updatedTrade, user.uid).catch(err => {
         console.error('Error updating trade in cloud:', err);
       });
-    }
-
-    const updated = trades.map((t) => (t.id === updatedTrade.id ? updatedTrade : t));
-    setTrades(updated);
-
-    if (user) {
-      const storageKey = `tradezella_journal_trades_${user.email}`;
+      const storageKey = `tradezella_journal_trades_${user.uid || user.email}`;
       localStorage.setItem(storageKey, JSON.stringify(updated));
     }
 
+    setTrades(updated);
     triggerNotification(`Updated trade modifications for ${updatedTrade.pair}.`);
   };
 
   // Clear all data
   const handleClearAll = () => {
     if (user) {
-      clearAllUserTrades(user.email).catch(err => {
+      clearAllUserTrades(user.email, user.uid).catch(err => {
         console.error('Error clearing trades in cloud:', err);
       });
-      const storageKey = `tradezella_journal_trades_${user.email}`;
+      const storageKey = `tradezella_journal_trades_${user.uid || user.email}`;
       localStorage.removeItem(storageKey);
     }
 
@@ -729,13 +757,19 @@ export default function App() {
     triggerNotification("Cleared all trade logs completely. Cloud database is fresh.");
   };
 
-  const handleSignOut = () => {
+  const handleSignOut = async () => {
+    try {
+      await logOutUser();
+    } catch (e) {
+      console.warn("Sign out notice:", e);
+    }
     localStorage.removeItem('tradezella_journal_user');
+    localStorage.removeItem('journaly_auth_token');
     localStorage.removeItem('journaly_starting_balance');
     setUser(null);
     setTrades([]);
     setSelectedDateFilter(null);
-    triggerNotification("Signed out of secure session.");
+    triggerNotification("Signed out of session.");
   };
 
   if (!user) {
@@ -799,18 +833,19 @@ export default function App() {
 
           {/* Time & Quick Utility Actions */}
           <div className="flex flex-wrap items-center gap-4 text-xs font-medium text-zinc-400">
-            {/* User Session Profile tag */}
+            {/* User Session Profile tag & Working Logout button */}
             {user && (
               <div id="user-profile-badge" className="flex items-center gap-2.5 px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-xl">
                 <img src={user.avatar} alt={user.name} className="w-5 h-5 rounded-full object-cover border border-emerald-500/40" />
-                <span className="text-[11px] font-bold text-zinc-100">{user.name}</span>
+                <span className="text-[11px] font-bold text-zinc-100 font-mono">{user.email}</span>
                 <button
                   onClick={handleSignOut}
-                  className="ml-1 text-zinc-500 hover:text-rose-400 transition-colors p-0.5 cursor-pointer flex items-center justify-center"
-                  title="Sign out of Google Session"
-                  id="btn-google-signout"
+                  className="ml-1 flex items-center gap-1.5 px-2 py-1 text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer text-[11px] font-semibold border border-transparent hover:border-rose-500/20"
+                  title="Sign out of your session"
+                  id="btn-app-logout"
                 >
-                  <LogOut size={13} />
+                  <LogOut size={12} />
+                  <span>Sign out</span>
                 </button>
               </div>
             )}

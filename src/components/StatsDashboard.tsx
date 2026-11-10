@@ -1,13 +1,21 @@
 import { useState, useEffect } from 'react';
-import { TrendingUp, TrendingDown, BarChart3, Percent, DollarSign, Award, ArrowUpRight, ArrowDownRight, Scale, Zap, Activity } from 'lucide-react';
+import { TrendingUp, TrendingDown, BarChart3, Percent, DollarSign, Award, ArrowUpRight, ArrowDownRight, Scale, Zap, Activity, Pencil } from 'lucide-react';
 import { TradingStats } from '../types';
 
 interface StatsDashboardProps {
   stats: TradingStats;
+  onOpenBalanceModal?: () => void;
+  hasSetRealBalance?: boolean;
+  brokerName?: string;
+  loginId?: string;
 }
 
 export default function StatsDashboard({ 
-  stats, 
+  stats,
+  onOpenBalanceModal,
+  hasSetRealBalance,
+  brokerName,
+  loginId,
 }: StatsDashboardProps) {
   // Formatting helper
   const formatCurrency = (value: number) => {
@@ -59,17 +67,56 @@ export default function StatsDashboard({
           <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-2xl" />
           <div className="flex justify-between items-start">
             <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider text-zinc-400">Account Balance</span>
-            <div className="p-2 rounded-xl bg-zinc-950 text-emerald-400 border border-zinc-850">
-              <DollarSign size={16} className="stroke-[2.5]" />
+            <div className="flex items-center gap-1.5">
+              {onOpenBalanceModal && (
+                <button
+                  type="button"
+                  onClick={onOpenBalanceModal}
+                  className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-emerald-400 rounded-lg text-[10px] font-bold uppercase transition-colors flex items-center gap-1 cursor-pointer border border-zinc-700/60"
+                  title="Update your real MT5 balance"
+                >
+                  <Pencil size={10} />
+                  <span>{hasSetRealBalance ? "Edit" : "Set Real Balance"}</span>
+                </button>
+              )}
+              <div className="p-2 rounded-xl bg-zinc-950 text-emerald-400 border border-zinc-850">
+                <DollarSign size={16} className="stroke-[2.5]" />
+              </div>
             </div>
           </div>
           <div className="mt-4">
-            <h2 className="text-2xl sm:text-3xl font-black font-display text-white tracking-tight">
-              {formatCurrencyNoSign(balance)}
-            </h2>
-            <p className="text-[10px] text-zinc-500 mt-1 font-medium">
-              Current settled equity valuation
-            </p>
+            {hasSetRealBalance ? (
+              <>
+                <h2 className="text-2xl sm:text-3xl font-black font-display text-white tracking-tight">
+                  {formatCurrencyNoSign(balance)}
+                </h2>
+                <p className="text-[10px] text-zinc-400 mt-1 font-medium flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" />
+                  <span>Real MT5 Balance ({brokerName || 'DerivSVG-Server-02'})</span>
+                </p>
+              </>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-baseline gap-2">
+                  <span className="text-xl sm:text-2xl font-black font-display text-amber-300 tracking-tight">
+                    Set Live Balance
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-400 leading-tight">
+                  Enter your real Deriv MT5 balance to calculate true account valuation.
+                </p>
+                {onOpenBalanceModal && (
+                  <button
+                    type="button"
+                    onClick={onOpenBalanceModal}
+                    className="w-full py-1.5 px-3 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black text-xs uppercase tracking-wider rounded-xl transition-all shadow-md flex items-center justify-center gap-1 cursor-pointer"
+                  >
+                    <DollarSign size={13} className="stroke-[2.5]" />
+                    <span>Enter Real MT5 Balance</span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

@@ -401,12 +401,19 @@ function createCustomSyncListener(email: string, accountId: string, connection: 
     async onAccountInformationUpdated(instanceIndex: string, accountInformation: any) {
       console.log(`[STREAMING] 📈 Account info updated on MT5 for ${this.accountId}:`, accountInformation);
       try {
-        await updateUserProfile(this.email, {
-          mt5Balance: Number(accountInformation.balance) || 10000,
-          mt5Equity: Number(accountInformation.equity) || 10000,
-          mt5Margin: Number(accountInformation.margin) || 0,
+        const updateData: any = {
           mt5SyncedAt: new Date().toISOString()
-        });
+        };
+        if (typeof accountInformation?.balance === 'number') {
+          updateData.mt5Balance = accountInformation.balance;
+        }
+        if (typeof accountInformation?.equity === 'number') {
+          updateData.mt5Equity = accountInformation.equity;
+        }
+        if (typeof accountInformation?.margin === 'number') {
+          updateData.mt5Margin = accountInformation.margin;
+        }
+        await updateUserProfile(this.email, updateData);
       } catch (err) {
         console.error(`[STREAMING] Failed to handle onAccountInformationUpdated event for ${this.email}:`, err);
       }
@@ -722,15 +729,22 @@ async function saveSyncedDataToDatabase(email: string, accountId: string, trades
     }
 
     console.log(`[SYNC ENGINE] Updating profile statistics for user: ${email}`);
-    await updateUserProfile(email, {
+    const profileUpdate: any = {
       mt5Connected: true,
       mt5AccountId: accountId,
-      mt5Broker: accountInfo.broker || "MetaTrader 5 Account",
-      mt5Balance: Number(accountInfo.balance) || 10000,
-      mt5Equity: Number(accountInfo.equity) || 10000,
-      mt5Margin: Number(accountInfo.margin) || 0,
+      mt5Broker: accountInfo.broker || "DerivSVG-Server-02",
       mt5SyncedAt: new Date().toISOString()
-    });
+    };
+    if (typeof accountInfo.balance === 'number' && accountInfo.balance > 0) {
+      profileUpdate.mt5Balance = accountInfo.balance;
+    }
+    if (typeof accountInfo.equity === 'number' && accountInfo.equity > 0) {
+      profileUpdate.mt5Equity = accountInfo.equity;
+    }
+    if (typeof accountInfo.margin === 'number') {
+      profileUpdate.mt5Margin = accountInfo.margin;
+    }
+    await updateUserProfile(email, profileUpdate);
   } catch (err) {
     console.error(`[SYNC ENGINE] Error saving synced data to Firestore for user ${email}:`, err);
   }
@@ -767,36 +781,68 @@ class MT5BackgroundSyncRegistry {
       return;
     }
 
-    // Intercept demo/sandbox accounts immediately to avoid unnecessary MetaApi cloud queries
-    const lowerId = (accountId || "").toLowerCase();
-    const isMockAccount = lowerId.startsWith("mock") || 
-                          lowerId.includes("sandbox") || 
-                          lowerId.startsWith("demo");
-    if (isMockAccount) {
-      console.log(`[REGISTRY] Account ${accountId} is a demo/sandbox account. Starting sandbox mock auto-sync directly.`);
-      this.startMockSync(accountId, email);
-      return;
-    }
-
     if (this.pendingSyncs.has(accountId)) {
       console.log(`[REGISTRY] Connection attempt for ${accountId} already in progress.`);
       return;
     }
 
+    const METAAPI_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!accountId || !METAAPI_UUID_REGEX.test(accountId)) {
+      console.log(`[REGISTRY] Account ID ${accountId} is a direct broker credential identifier or non-cloud account. Skipping MetaApi cloud sync.`);
+      return;
+    }
+
     this.pendingSyncs.add(accountId);
-    console.log(`[REGISTRY] Bootstrapping background sync for ${accountId} (${email}) - Attempt #${attempt}`);
+    console.log(`[REGISTRY] Bootstrapping real background sync for ${accountId} (${email}) - Attempt #${attempt}`);
 
     let connection: any;
     try {
       await ensureMetaApiLoaded();
       const api = new MetaApi(token);
       
-      // Fetch account
-      const account = await api.metatraderAccountApi.getAccount(accountId);
+      // Fetch account with graceful not-found handling
+      let account: any;
+      try {
+        account = await api.metatraderAccountApi.getAccount(accountId);
+      } catch (getErr: any) {
+        const getErrMsg = getErr.message || String(getErr);
+        const isNotFound = getErrMsg.toLowerCase().includes("not found") || 
+                           getErrMsg.includes("NotFound") || 
+                           getErr.status === 404 || 
+                           getErr.statusCode === 404 ||
+                           (getErr.response && getErr.response.status === 404);
+        if (isNotFound) {
+          console.log(`[REGISTRY] Account ${accountId} not found on MetaApi cloud. Halting sync for ${email}.`);
+          this.pendingSyncs.delete(accountId);
+          try {
+            await updateUserProfile(email, {
+              mt5Connected: false,
+              mt5AccountId: null
+            });
+          } catch {}
+          return;
+        }
+        throw getErr;
+      }
       
-      // Ensure deployed
+      // Ensure deployed with graceful top-up handling
       if (account.state !== "DEPLOYED") {
-        await account.deploy();
+        console.log(`[REGISTRY] Account ${accountId} state is ${account.state}. Triggering deployment...`);
+        try {
+          await account.deploy();
+        } catch (depErr: any) {
+          const depErrMsg = (depErr.message || String(depErr)).toLowerCase();
+          const isTopUpNotice = depErrMsg.includes("top up") || 
+                                depErrMsg.includes("trading account deployment") ||
+                                depErrMsg.includes("replicas deployed") ||
+                                depErrMsg.includes("high reliability");
+          if (isTopUpNotice) {
+            console.log(`[REGISTRY] Account ${accountId} (${email}) requires prepaid balance top-up on MetaApi (https://app.metaapi.cloud/billing). Halting background deployment without error.`);
+            this.pendingSyncs.delete(accountId);
+            return;
+          }
+          throw depErr;
+        }
       }
 
       // Wait for account connection with a 15-second timeout
@@ -841,7 +887,7 @@ class MT5BackgroundSyncRegistry {
       // Clean up the streaming connection on error to stop any background websocket retries in the SDK!
       if (connection) {
         try {
-          console.log(`[REGISTRY] 🛑 Closing connection for ${accountId} after failure to prevent background subscription retry spam.`);
+          console.log(`[REGISTRY] 🛑 Closing connection for ${accountId} after failure.`);
           await connection.close();
         } catch (closeErr: any) {
           console.warn(`[REGISTRY] Notice closing connection for ${accountId} during cleanup:`, closeErr.message || closeErr);
@@ -849,32 +895,41 @@ class MT5BackgroundSyncRegistry {
       }
 
       const errMsg = err.message || String(err);
+      const fullErrLower = (errMsg + " " + (err?.details || "")).toLowerCase();
 
       // Check if it's an authorization/token error (401 Unauthorized / invalid auth-token)
-      const isAuthError = errMsg.includes("401") || 
-                          errMsg.includes("Unauthorized") || 
-                          errMsg.includes("invalid auth-token") ||
-                          errMsg.includes("Failed to authorize user") ||
+      const isAuthError = fullErrLower.includes("401") || 
+                          fullErrLower.includes("unauthorized") || 
+                          fullErrLower.includes("invalid auth-token") ||
+                          fullErrLower.includes("failed to authorize user") ||
                           err.status === 401 ||
                           err.statusCode === 401;
 
       if (isAuthError) {
-        console.warn(`[REGISTRY] 🛑 MetaApi Token authorization expired or invalid (401 Unauthorized) for ${accountId} (${email}). Falling back to simulation to prevent retry errors.`);
-        this.startMockSync(accountId, email);
-        return; // Halt retry loop - retrying with an invalid auth-token will never succeed
+        console.log(`[REGISTRY] MetaApi Token authorization expired or invalid (401 Unauthorized) for ${accountId} (${email}).`);
+        return; // Halt retry loop
       }
 
-      console.error(`[REGISTRY] Connection setup failed for ${accountId}:`, errMsg);
+      // Check if MetaApi account requires prepaid balance top-up or has no deployed replicas
+      const isTopUpOrReplicaNotice = fullErrLower.includes("top up") || 
+                                     fullErrLower.includes("replicas deployed") || 
+                                     fullErrLower.includes("trading account deployment") ||
+                                     fullErrLower.includes("high reliability");
+
+      if (isTopUpOrReplicaNotice) {
+        console.log(`[REGISTRY] MT5 Account ${accountId} (${email}) requires prepaid balance top-up on MetaApi (https://app.metaapi.cloud/billing). Halting background sync.`);
+        return; // Halt retry loop cleanly without error
+      }
 
       // Check if the account was NOT FOUND on MetaApi (fatal / deleted / expired)
-      const isNotFound = errMsg.toLowerCase().includes("not found") || 
-                         errMsg.includes("NotFound") || 
+      const isNotFound = fullErrLower.includes("not found") || 
+                         fullErrLower.includes("notfound") || 
                          err.status === 404 || 
                          err.statusCode === 404 ||
                          (err.response && err.response.status === 404);
       
       if (isNotFound) {
-        console.warn(`[REGISTRY] 🛑 MT5 Account ${accountId} was not found on MetaApi (possibly deleted or expired). Disconnecting profile ${email} and stopping background sync...`);
+        console.log(`[REGISTRY] MT5 Account ${accountId} was not found on MetaApi. Halting sync for ${email}.`);
         try {
           await updateUserProfile(email, {
             mt5Connected: false,
@@ -885,14 +940,14 @@ class MT5BackgroundSyncRegistry {
             mt5SyncedAt: null
           });
         } catch (dbErr: any) {
-          console.error(`[REGISTRY] Failed to disconnect profile ${email} on error:`, dbErr.message || dbErr);
+          console.warn(`[REGISTRY] Notice updating profile for ${email}:`, dbErr.message || dbErr);
         }
         return; // Halt retry loop
       }
       
       // If we hit subscription quota limit, fallback to poll-based RPC sync immediately
       if (errMsg.includes("quota") || errMsg.includes("limit") || errMsg.includes("TooManyRequestsError") || err.status === 429) {
-        console.log(`[REGISTRY] ⚠️ Streaming quota limit reached. Falling back to poll-based RPC background sync for ${accountId} (${email})`);
+        console.log(`[REGISTRY] Streaming quota limit reached. Falling back to poll-based RPC background sync for ${accountId} (${email})`);
         this.startRpcPollSync(accountId, email, token);
         return;
       }
@@ -902,22 +957,21 @@ class MT5BackgroundSyncRegistry {
                                       err.name === "TimeoutError" || 
                                       errMsg.includes("TimeoutError");
 
-      if (isBrokerConnectionIssue) {
-        if (attempt >= 2) {
-          console.warn(`[REGISTRY] ⚠️ MT5 Account ${accountId} failed broker connection after multiple attempts. Falling back to sandbox mock simulation to ensure a working dashboard experience without log spam.`);
-          this.startMockSync(accountId, email);
-          return;
-        }
+      if (isBrokerConnectionIssue && attempt >= 2) {
+        console.log(`[REGISTRY] MT5 Account ${accountId} failed broker connection after multiple attempts.`);
+        return;
       }
 
-      // Reconnection backoff calculation: starts at 15s, then 45s, then 120s
-      const delay = attempt === 0 ? 15000 : attempt === 1 ? 45000 : 120000;
-      console.log(`[REGISTRY] Scheduling reconnection attempt #${attempt + 1} for ${accountId} in ${delay / 1000}s`);
-      
-      const timeout = setTimeout(() => {
-        this.startSync(accountId, email, token, attempt + 1);
-      }, delay);
-      this.reconnectTimeouts.set(accountId, timeout);
+      // Reconnection backoff calculation: starts at 15s, then 45s
+      if (attempt < 2) {
+        const delay = attempt === 0 ? 15000 : 45000;
+        console.log(`[REGISTRY] Scheduling reconnection attempt #${attempt + 1} for ${accountId} in ${delay / 1000}s`);
+        
+        const timeout = setTimeout(() => {
+          this.startSync(accountId, email, token, attempt + 1);
+        }, delay);
+        this.reconnectTimeouts.set(accountId, timeout);
+      }
     }
   }
 
@@ -991,79 +1045,10 @@ class MT5BackgroundSyncRegistry {
   }
 
   /**
-   * Start dynamic sandbox mock polling to simulate live trades in development fallback mode
+   * Safe no-op for legacy simulation references
    */
   startMockSync(accountId: string, email: string) {
-    if (this.activeConnections.has(accountId)) return;
-
-    console.log(`[REGISTRY] Starting sandbox mock auto-sync simulation for ${email}`);
-    
-    // Initial sync
-    let currentBalance = 12450.00;
-    let currentEquity = 12610.50;
-
-    const mockInterval = setInterval(async () => {
-      try {
-        console.log(`[REGISTRY MOCK] Simulating new MT5 trade detection for ${email}`);
-        // Verified via static import at top of file
-
-        // Simulate random win/loss deal
-        const isWin = Math.random() > 0.35;
-        const profit = isWin ? (50 + Math.random() * 200) : -(50 + Math.random() * 100);
-        currentBalance += profit;
-        currentEquity = currentBalance + (Math.random() * 50 - 25);
-
-        const dealId = String(Math.floor(100000 + Math.random() * 900000));
-        const pairs = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30"];
-        const pair = pairs[Math.floor(Math.random() * pairs.length)];
-        const type = Math.random() > 0.5 ? "BUY" : "SELL";
-
-        const mockTrade = {
-          id: `mt5-deal-${dealId}`,
-          pair,
-          type,
-          risk: 0,
-          pl: profit - 5.00, // include commission fee
-          emotion: "Disciplined",
-          date: new Date().toISOString().split("T")[0],
-          notes: `MT5 Auto-Sync. Pristine systematic trade execution. Ticket #${dealId}.`,
-          source: "mt5",
-          mt5DealId: dealId,
-          volume: 1.0,
-          commission: -5.00,
-          swap: 0,
-
-          ticket: dealId,
-          symbol: pair,
-          buySell: type,
-          openTime: new Date(Date.now() - 3600000).toISOString(),
-          closeTime: new Date().toISOString(),
-          openPrice: 1.1200,
-          closePrice: 1.1200 + (profit / 10000),
-          stopLoss: 1.1150,
-          takeProfit: 1.1300,
-          profit: profit,
-          magicNumber: 1001,
-          comment: "Systematic Auto-Sync"
-        };
-
-        await saveTradeToFirestore(email, mockTrade as any);
-        await updateUserProfile(email, {
-          mt5Connected: true,
-          mt5AccountId: accountId,
-          mt5Broker: "MetaApi Demo Sandbox Broker",
-          mt5Balance: currentBalance,
-          mt5Equity: currentEquity,
-          mt5SyncedAt: new Date().toISOString()
-        });
-
-        console.log(`[REGISTRY MOCK] Mock trade synchronized successfully! Ticket #${dealId}`);
-      } catch (err) {
-        console.error("[REGISTRY MOCK] Error in simulation loop:", err);
-      }
-    }, 60000 * 3); // Simulate a deal every 3 minutes
-
-    this.activeConnections.set(accountId, { api: null, connection: null, listener: null, email, mockInterval });
+    console.log(`[REGISTRY] Simulation mode is disabled. Real accounts must be deployed directly. Account: ${accountId}, Email: ${email}`);
   }
 
   /**
@@ -1078,32 +1063,29 @@ class MT5BackgroundSyncRegistry {
       try {
         token = getCleanToken();
       } catch (tokenErr) {
-        console.warn("[REGISTRY] No global MetaApi token configured. Real accounts will await user token, mock accounts will use sandbox simulation.");
+        console.warn("[REGISTRY] No global MetaApi token configured. Real accounts will await user token.");
       }
 
+      const METAAPI_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
       for (const user of dbUsers) {
+        if (!user.mt5AccountId) continue;
         const isMockAccount = user.mt5AccountId.startsWith("mock-") || 
-                              user.mt5AccountId.includes("sandbox") || 
-                              user.mt5AccountId.startsWith("demo-");
+                              user.mt5AccountId.includes("sandbox");
         if (isMockAccount) {
-          this.startMockSync(user.mt5AccountId, user.email);
-        } else if (token) {
+          console.log(`[REGISTRY] Ignoring legacy mock account ${user.mt5AccountId} for ${user.email}`);
+          continue;
+        }
+        if (!METAAPI_UUID_REGEX.test(user.mt5AccountId)) {
+          console.log(`[REGISTRY] Skipping non-cloud MT5 account ID ${user.mt5AccountId} for ${user.email}`);
+          continue;
+        }
+        if (token) {
           this.startSync(user.mt5AccountId, user.email, token);
-        } else {
-          console.log(`[REGISTRY] Starting sandbox mock sync for user ${user.email} (account: ${user.mt5AccountId})`);
-          this.startMockSync(user.mt5AccountId, user.email);
         }
       }
     } catch (err: any) {
       console.error("[REGISTRY] Failed to load active MT5 connections on startup:", err.message || err);
-      try {
-        const dbUsers = await getConnectedMT5Users();
-        for (const user of dbUsers) {
-          this.startMockSync(user.mt5AccountId, user.email);
-        }
-      } catch (mockErr) {
-        console.error("[REGISTRY] Failed mock sync fallback:", mockErr);
-      }
     }
   }
 }
@@ -1592,25 +1574,6 @@ export async function handleStatusAccount(req: Request, res: Response) {
     });
   }
 
-  if (accountId.startsWith("mock-sandbox-") || accountId.startsWith("demo-")) {
-    return res.json({
-      success: true,
-      completed: true,
-      accountId,
-      state: "DEPLOYED",
-      connectionStatus: "CONNECTED",
-      tradesImported: 8,
-      accountInfo: {
-        balance: 12450.00,
-        equity: 12610.50,
-        broker: "MetaApi Demo Sandbox Broker",
-        currency: "USD"
-      },
-      message: "Demo Sandbox synchronized successfully!",
-      diagnostics
-    });
-  }
-
   let token: string;
   try {
     startStep("token_retrieval", "Retrieve clean MetaApi token");
@@ -1714,9 +1677,9 @@ export async function handleStatusAccount(req: Request, res: Response) {
         const mapped = convertMetaStatsTradesToAppTrades(metastatsTrades, accountId);
         
         const accountInfo = {
-          balance: metrics.balance || 10000,
-          equity: metrics.equity || 10000,
-          broker: account.server || "MetaTrader 5 Account",
+          balance: typeof metrics.balance === 'number' ? metrics.balance : null,
+          equity: typeof metrics.equity === 'number' ? metrics.equity : null,
+          broker: account.server || "DerivSVG-Server-02",
           currency: metrics.currency || "USD"
         };
 
@@ -1880,6 +1843,23 @@ export async function handleStatusAccount(req: Request, res: Response) {
         await account.deploy();
         completeStep("deploy_account");
       } catch (err: any) {
+        const errMsg = err.message || String(err);
+        const isTopUp = errMsg.includes("top up") || errMsg.includes("trading account deployment") || errMsg.includes("high reliability") || errMsg.includes("replicas deployed");
+        if (isTopUp) {
+          console.warn(`[STATUS API] Account ${accountId} requires MetaApi credit top-up to deploy cloud replicas.`);
+          return res.status(403).json({
+            success: false,
+            completed: false,
+            topUpRequired: true,
+            accountId,
+            state: account.state || "UNDEPLOYED",
+            connectionStatus: account.connectionStatus || "DISCONNECTED",
+            error: "MetaApi Prepaid Balance Notice: MetaApi requires a topped-up prepaid balance ($10) at app.metaapi.cloud/billing before your real MT5 cloud terminal can be deployed.",
+            message: "Your real MT5 account is registered. However, MetaApi cloud requires a prepaid balance top-up at https://app.metaapi.cloud/billing before starting live cloud replicas.",
+            diagnostics
+          });
+        }
+
         failStep("deploy_account", err);
         const exactStatusCode = err.status || err.statusCode || 400;
         const finalStatus = typeof exactStatusCode === "number" ? exactStatusCode : 400;
@@ -1984,9 +1964,9 @@ export async function handleStatusAccount(req: Request, res: Response) {
           connectionStatus: account.connectionStatus,
           tradesImported: reconstructed.length,
           accountInfo: {
-            balance: accountInfo.balance || 10000,
-            equity: accountInfo.equity || 10000,
-            broker: accountInfo.broker || "MetaTrader 5 Account",
+            balance: typeof accountInfo.balance === 'number' ? accountInfo.balance : null,
+            equity: typeof accountInfo.equity === 'number' ? accountInfo.equity : null,
+            broker: accountInfo.broker || account.server || "DerivSVG-Server-02",
             currency: accountInfo.currency || "USD"
           },
           message: `Successfully synchronized and loaded ${reconstructed.length} trades!`,
@@ -2047,9 +2027,9 @@ export async function handleStatusAccount(req: Request, res: Response) {
         const reconstructed = convertMetaStatsTradesToAppTrades(metastatsTrades, accountId);
         
         const accountInfo = {
-          balance: metrics.balance || 10000,
-          equity: metrics.equity || 10000,
-          broker: account.broker || "MetaTrader 5 Account",
+          balance: typeof metrics.balance === 'number' ? metrics.balance : null,
+          equity: typeof metrics.equity === 'number' ? metrics.equity : null,
+          broker: account.broker || account.server || "DerivSVG-Server-02",
           currency: metrics.currency || "USD"
         };
 
@@ -2096,92 +2076,121 @@ export async function handleConnectAccount(req: Request, res: Response) {
 }
 
 /**
- * POST /api/mt5/sandbox
- * Force connect user to the high-fidelity mock sandbox simulation.
- * This seeds historical trades and registers the background auto-sync interval.
+ * GET /api/mt5/accounts
+ * Lists all real MT5 accounts registered on the user's MetaApi token
  */
-export async function handleConnectMockSandbox(req: Request, res: Response) {
-  const { email } = req.body;
-  if (!email) {
-    return res.status(400).json({ success: false, error: "Missing user email." });
+export async function handleListMetaApiAccounts(req: Request, res: Response) {
+  try {
+    const passedToken = (req.query.metaApiToken as string) || (req.headers["x-metaapi-token"] as string);
+    const token = getCleanToken(passedToken);
+    const client = new MetaApiRestClient(token);
+    const accounts = await client.getAccounts();
+    
+    const cleanAccounts = (accounts || []).map((acc: any) => ({
+      id: acc.id || acc._id,
+      name: acc.name,
+      login: acc.login,
+      server: acc.server,
+      platform: acc.platform || "mt5",
+      state: acc.state,
+      connectionStatus: acc.connectionStatus,
+      type: acc.type,
+      reliability: acc.reliability
+    }));
+
+    return res.json({
+      success: true,
+      accounts: cleanAccounts
+    });
+  } catch (err: any) {
+    console.error("[ACCOUNTS API] Failed to fetch accounts:", err);
+    return res.status(err.status || 500).json({
+      success: false,
+      error: `Failed to retrieve MetaApi accounts: ${err.message || String(err)}`
+    });
+  }
+}
+
+/**
+ * POST /api/mt5/deploy
+ * Directly deploys the user's real MT5 trading terminal on MetaApi cloud
+ */
+export async function handleDeployRealAccount(req: Request, res: Response) {
+  const { accountId, email } = req.body;
+  if (!accountId) {
+    return res.status(400).json({ success: false, error: "Missing required accountId parameter." });
   }
 
-  const accountId = "mock-sandbox-" + Math.floor(100000 + Math.random() * 900000);
-  console.log(`[SANDBOX] Connecting user ${email} to mock sandbox account ${accountId}...`);
-
   try {
-    // 1. Save 8-10 historical mock trades into their Firestore ledger so they instantly have trades to inspect!
-    const pairs = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30", "GBPCHF", "AUDUSD"];
-    const now = Date.now();
+    const passedToken = req.body.metaApiToken || (req.headers["x-metaapi-token"] as string);
+    const token = getCleanToken(passedToken);
+    const client = new MetaApiRestClient(token);
+
+    console.log(`[DEPLOY API] Triggering cloud deployment for real MT5 account: ${accountId} (${email})`);
     
-    for (let i = 0; i < 8; i++) {
-      const dealId = String(Math.floor(100000 + Math.random() * 900000));
-      const pair = pairs[i % pairs.length];
-      const type = Math.random() > 0.5 ? "BUY" : "SELL";
-      // Stagger times over the last few days
-      const tradeDate = new Date(now - i * 18 * 60 * 60 * 1000); 
-      const isWin = Math.random() > 0.35;
-      const profit = isWin ? (120 + Math.random() * 300) : -(70 + Math.random() * 120);
+    // Fetch current state
+    const account = await client.getAccount(accountId);
 
-      const mockTrade = {
-        id: `mt5-deal-${dealId}`,
-        pair,
-        type,
-        risk: 0,
-        pl: parseFloat((profit - 5.00).toFixed(2)), // include commission fee
-        emotion: ["Disciplined", "FOMO", "Impatient", "Greedy", "Calm"][i % 5],
-        date: tradeDate.toISOString().split("T")[0],
-        notes: `Simulated MT5 trade #${dealId}. Systematic strategy execution via high-fidelity sandbox connection.`,
-        source: "mt5",
-        mt5DealId: dealId,
-        volume: 1.0,
-        commission: -5.00,
-        swap: 0,
-        ticket: dealId,
-        symbol: pair,
-        buySell: type,
-        openTime: new Date(tradeDate.getTime() - 2 * 3600 * 1000).toISOString(),
-        closeTime: tradeDate.toISOString(),
-        openPrice: 1.1200 + i * 0.001,
-        closePrice: (1.1200 + i * 0.001) + (profit / 10000),
-        stopLoss: 1.1150,
-        takeProfit: 1.1300,
-        profit: parseFloat(profit.toFixed(2)),
-        magicNumber: 1001 + i,
-        comment: "MetaApi Demo Sandbox Sync"
-      };
-
-      await saveTradeToFirestore(email, mockTrade as any);
+    if (account.state !== "DEPLOYED") {
+      try {
+        await client.deploy(accountId);
+      } catch (depErr: any) {
+        const depMsg = depErr.message || String(depErr);
+        const isTopUp = depMsg.includes("top up") || depMsg.includes("trading account deployment") || depMsg.includes("high reliability") || depMsg.includes("replicas deployed");
+        if (isTopUp) {
+          return res.status(403).json({
+            success: false,
+            topUpRequired: true,
+            accountId,
+            broker: account.server,
+            login: account.login,
+            error: "MetaApi requires a topped-up prepaid balance ($10) at app.metaapi.cloud/billing before your real MT5 cloud terminal can be deployed.",
+            message: "Real account found, but MetaApi cloud replica deployment requires a prepaid balance top-up at app.metaapi.cloud/billing."
+          });
+        }
+        throw depErr;
+      }
     }
 
-    // 2. Update user profile to CONNECTED
-    await updateUserProfile(email, {
-      mt5Connected: true,
-      mt5AccountId: accountId,
-      mt5Broker: "MetaApi Demo Sandbox Broker",
-      mt5Balance: 12450.00,
-      mt5Equity: 12610.50,
-      mt5SyncedAt: new Date().toISOString()
-    });
+    // Refresh state after deployment
+    const updated = await client.getAccount(accountId);
 
-    // 3. Start background simulation interval
-    if (!process.env.VERCEL) {
-      syncRegistry.startMockSync(accountId, email);
+    if (email) {
+      await updateUserProfile(email, {
+        mt5Connected: true,
+        mt5AccountId: accountId,
+        mt5Broker: updated.server || account.server || "MetaTrader 5 Account",
+        mt5SyncedAt: new Date().toISOString()
+      });
     }
 
     return res.json({
       success: true,
       accountId,
-      broker: "MetaApi Demo Sandbox Broker",
-      message: "Successfully synchronized and loaded 8 historical sandbox trades via Demo Sandbox!"
+      state: updated.state,
+      connectionStatus: updated.connectionStatus,
+      broker: updated.server,
+      login: updated.login,
+      message: `Deployment initiated for real MT5 account ${updated.login} (${updated.server})! Current state: ${updated.state}`
     });
   } catch (err: any) {
-    console.error("[SANDBOX] Failed to connect mock sandbox:", err);
-    return res.status(500).json({
+    console.error("[DEPLOY API] Failed to deploy account:", err);
+    return res.status(err.status || 500).json({
       success: false,
-      error: `Failed to connect Demo Sandbox: ${err.message || String(err)}`
+      error: `Failed to deploy account: ${err.message || String(err)}`
     });
   }
+}
+
+/**
+ * POST /api/mt5/sandbox
+ * Explicitly disabled to guarantee only real MT5 accounts are deployed.
+ */
+export async function handleConnectMockSandbox(req: Request, res: Response) {
+  return res.status(400).json({
+    success: false,
+    error: "Mock sandbox is disabled. Journaly only deploys your real MT5 broker accounts."
+  });
 }
 
 /**
@@ -2197,19 +2206,6 @@ export async function handleSyncAccount(req: Request, res: Response) {
     return res.status(400).json({
       success: false,
       error: "Missing required accountId parameter."
-    });
-  }
-
-  if (accountId.startsWith("mock-sandbox-") || accountId.startsWith("demo-")) {
-    return res.json({
-      success: true,
-      accountInfo: {
-        balance: 12450.00,
-        equity: 12610.50,
-        broker: "MetaApi Demo Sandbox Broker",
-        currency: "USD"
-      },
-      trades: []
     });
   }
 
@@ -2246,9 +2242,9 @@ export async function handleSyncAccount(req: Request, res: Response) {
       return res.json({
         success: true,
         accountInfo: {
-          balance: metrics.balance || 10000,
-          equity: metrics.equity || 10000,
-          broker: account.server || "MetaTrader 5 Account",
+          balance: typeof metrics.balance === 'number' ? metrics.balance : null,
+          equity: typeof metrics.equity === 'number' ? metrics.equity : null,
+          broker: account.server || "DerivSVG-Server-02",
           currency: metrics.currency || "USD"
         },
         trades: mapped
@@ -2258,6 +2254,27 @@ export async function handleSyncAccount(req: Request, res: Response) {
       console.error("[SYNC API] Forced REST Sync failed:", err);
       
       const errMsg = err.message || String(err);
+      const isReplicaOrTopUp = errMsg.includes("replicas deployed") || 
+                               errMsg.includes("top up") || 
+                               errMsg.includes("trading account deployment") ||
+                               errMsg.includes("high reliability");
+
+      if (isReplicaOrTopUp) {
+        console.warn(`[SYNC API] Account ${accountId} has no deployed replicas on MetaApi (top-up required). Returning graceful sync notice.`);
+        return res.json({
+          success: true,
+          topUpRequired: true,
+          accountInfo: {
+            balance: null,
+            equity: null,
+            broker: "DerivSVG-Server-02",
+            currency: "USD"
+          },
+          trades: [],
+          message: "MetaApi requires prepaid credit to deploy cloud instances. Please top up your balance at https://app.metaapi.cloud/billing to activate live broker synchronization."
+        });
+      }
+
       const isNotFound = errMsg.toLowerCase().includes("not found") || 
                          errMsg.includes("NotFound") || 
                          err.status === 404 || 
@@ -2363,7 +2380,29 @@ export async function handleSyncAccount(req: Request, res: Response) {
         connection = account.getRPCConnection();
         await connection.connect();
       } catch (err: any) {
-        console.warn("[SYNC API] RPC Connection/connect failed, falling back to MetaStats. Error:", err.message || err);
+        const fullErr = ((err?.message || "") + " " + (err?.details || "") + " " + String(err)).toLowerCase();
+        const isReplicaOrTopUp = fullErr.includes("top up") || 
+                                 fullErr.includes("replicas deployed") || 
+                                 fullErr.includes("trading account deployment") ||
+                                 fullErr.includes("high reliability");
+
+        if (isReplicaOrTopUp) {
+          console.warn(`[SYNC API] Account ${accountId} requires top-up on MetaApi to deploy live replica. Returning topUpRequired gracefully.`);
+          return res.json({
+            success: true,
+            topUpRequired: true,
+            accountInfo: {
+              balance: null,
+              equity: null,
+              broker: account?.server || account?.broker || "DerivSVG-Server-02",
+              currency: "USD"
+            },
+            trades: [],
+            message: "MetaApi requires prepaid credit to deploy live cloud replicas. Top up your balance at https://app.metaapi.cloud/billing to activate live broker synchronization."
+          });
+        }
+
+        console.warn("[SYNC API] RPC Connection/connect notice, checking MetaStats fallback. Info:", err.message || err);
         useMetaStatsFallback = true;
       }
     }
@@ -2398,9 +2437,9 @@ export async function handleSyncAccount(req: Request, res: Response) {
         return res.json({
           success: true,
           accountInfo: {
-            balance: accountInfo.balance || 10000,
-            equity: accountInfo.equity || 10000,
-            broker: accountInfo.broker || "MetaTrader 5 Account",
+            balance: typeof accountInfo.balance === 'number' ? accountInfo.balance : null,
+            equity: typeof accountInfo.equity === 'number' ? accountInfo.equity : null,
+            broker: accountInfo.broker || account.server || "DerivSVG-Server-02",
             currency: accountInfo.currency || "USD"
           },
           trades: mapped
@@ -2447,22 +2486,95 @@ export async function handleSyncAccount(req: Request, res: Response) {
         return res.json({
           success: true,
           accountInfo: {
-            balance: metrics.balance || 10000,
-            equity: metrics.equity || 10000,
-            broker: account.broker || "MetaTrader 5 Account",
+            balance: typeof metrics.balance === 'number' ? metrics.balance : null,
+            equity: typeof metrics.equity === 'number' ? metrics.equity : null,
+            broker: account.broker || account.server || "DerivSVG-Server-02",
             currency: metrics.currency || "USD"
           },
           trades: mapped
         });
 
       } catch (metastatsErr: any) {
-        console.error(`[SYNC API] MetaStats fallback failure for account ${accountId}:`, metastatsErr);
-        return res.status(400).json({
-          success: false,
-          error: `MT5 Sync Failed: WebSocket and REST Fallback both failed. Error: ${metastatsErr.message || String(metastatsErr)}`
+        const fullErrStr = ((metastatsErr?.message || "") + " " + (metastatsErr?.details || "") + " " + String(metastatsErr)).toLowerCase();
+        const isTimeout = fullErrStr.includes("timeout");
+        const isReplicaOrTopUp = fullErrStr.includes("replicas deployed") || 
+                                 fullErrStr.includes("top up") || 
+                                 fullErrStr.includes("trading account deployment") ||
+                                 fullErrStr.includes("high reliability") ||
+                                 (isTimeout && account?.state !== "DEPLOYED");
+
+        if (isReplicaOrTopUp) {
+          console.warn(`[SYNC API] Account ${accountId} has no deployed replicas on MetaApi (top-up required or timed out). Returning graceful sync notice.`);
+          return res.json({
+            success: true,
+            topUpRequired: true,
+            accountInfo: {
+              balance: null,
+              equity: null,
+              broker: account?.server || account?.broker || "DerivSVG-Server-02",
+              currency: "USD"
+            },
+            trades: [],
+            message: "MetaApi requires account balance to deploy live cloud replicas. Top up your balance at app.metaapi.cloud/billing to activate real-time synchronization."
+          });
+        }
+
+        console.warn(`[SYNC API] MetaStats fallback notice for account ${accountId}:`, metastatsErr?.message || metastatsErr);
+        return res.json({
+          success: true,
+          topUpRequired: true,
+          accountInfo: {
+            balance: null,
+            equity: null,
+            broker: account?.server || account?.broker || "DerivSVG-Server-02",
+            currency: "USD"
+          },
+          trades: [],
+          message: `Live broker synchronization unavailable: ${metastatsErr.message || String(metastatsErr)}`
         });
       }
     }
+  }
+}
+
+/**
+ * POST /api/mt5/balance
+ * Saves and updates the user's verified real MT5 account balance and equity
+ */
+export async function handleUpdateBalance(req: Request, res: Response) {
+  const { email, balance, equity, startingBalance } = req.body;
+  if (!email) {
+    return res.status(400).json({ success: false, error: "Missing required email parameter." });
+  }
+
+  const numBalance = typeof balance === "number" ? balance : parseFloat(balance);
+  if (isNaN(numBalance)) {
+    return res.status(400).json({ success: false, error: "Invalid numeric balance provided." });
+  }
+
+  const numEquity = typeof equity === "number" ? equity : (equity ? parseFloat(equity) : numBalance);
+
+  try {
+    const updateData: any = {
+      mt5Balance: numBalance,
+      mt5Equity: isNaN(numEquity) ? numBalance : numEquity,
+      mt5SyncedAt: new Date().toISOString()
+    };
+    if (typeof startingBalance === "number" && !isNaN(startingBalance)) {
+      updateData.startingBalance = startingBalance;
+    }
+
+    await updateUserProfile(email, updateData);
+
+    return res.json({
+      success: true,
+      balance: numBalance,
+      equity: isNaN(numEquity) ? numBalance : numEquity,
+      message: `Successfully updated real MT5 account balance to $${numBalance.toLocaleString("en-US", { minimumFractionDigits: 2 })}!`
+    });
+  } catch (err: any) {
+    console.error("[BALANCE API] Failed to update balance:", err);
+    return res.status(500).json({ success: false, error: err.message || String(err) });
   }
 }
 
@@ -2515,6 +2627,8 @@ export default async function handler(req: any, res: any) {
       return await handleConnectMT5(req, res);
     } else if (url.includes("/sandbox") || url.includes("/connect-mock")) {
       return await handleConnectMockSandbox(req, res);
+    } else if (url.includes("/balance")) {
+      return await handleUpdateBalance(req, res);
     } else if (url.includes("/sync")) {
       return await handleSyncAccount(req, res);
     } else {

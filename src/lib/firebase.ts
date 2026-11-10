@@ -12,6 +12,20 @@ import {
   getDoc,
   onSnapshot
 } from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged, 
+  updateProfile,
+  sendSignInLinkToEmail,
+  isSignInWithEmailLink,
+  signInWithEmailLink,
+  User as FirebaseUser
+} from 'firebase/auth';
 import { Trade } from '../types';
 
 const getEnvVal = (key: string): string | undefined => {
@@ -40,6 +54,8 @@ const firebaseConfig = {
 
 let app: any;
 let db: any;
+let auth: any;
+let googleProvider: GoogleAuthProvider;
 
 try {
   app = initializeApp(firebaseConfig);
@@ -50,17 +66,21 @@ try {
   const databaseId = getEnvVal("FIREBASE_DATABASE_ID") || (projectId === "ringed-cable-xdpgw" ? "ai-studio-b19d81c5-cbb4-43e1-a861-6306ce0a7fd6" : undefined);
   
   db = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+  auth = getAuth(app);
+  googleProvider = new GoogleAuthProvider();
+  googleProvider.setCustomParameters({ prompt: 'select_account' });
 } catch (err: any) {
-  console.error("[FIREBASE INITIALIZATION ERROR] Failed to initialize Firebase app or Firestore:", err);
-  // We export a proxy or a dummy object for db that will throw a descriptive error when accessed
+  console.error("[FIREBASE INITIALIZATION ERROR] Failed to initialize Firebase app, Firestore, or Auth:", err);
   db = new Proxy({}, {
     get(target, prop) {
-      throw new Error(`Firebase failed to initialize correctly during module loading. Real initialization error: ${err.message || String(err)}`);
+      throw new Error(`Firebase failed to initialize correctly. Real initialization error: ${err.message || String(err)}`);
     }
   });
+  auth = null as any;
+  googleProvider = null as any;
 }
 
-export { db };
+export { db, auth, googleProvider, onAuthStateChanged };
 
 
 export enum OperationType {
@@ -107,15 +127,33 @@ export function handleFirestoreError(error: any, operationType: OperationType, p
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Helper: Fetch all trades for an email
-export async function getTradesForUser(email: string): Promise<Trade[]> {
+// Helper: Fetch all trades for an email / userId
+export async function getTradesForUser(email: string, userId?: string): Promise<Trade[]> {
   const collectionPath = 'trades';
   try {
-    const q = query(
-      collection(db, collectionPath),
-      where('email', '==', email.toLowerCase())
-    );
-    const snapshot = await getDocs(q);
+    let snapshot;
+    if (userId) {
+      const q = query(
+        collection(db, collectionPath),
+        where('userId', '==', userId)
+      );
+      snapshot = await getDocs(q);
+      // Fallback: if no trades found by userId, check by email
+      if (snapshot.empty && email) {
+        const qEmail = query(
+          collection(db, collectionPath),
+          where('email', '==', email.toLowerCase())
+        );
+        snapshot = await getDocs(qEmail);
+      }
+    } else {
+      const q = query(
+        collection(db, collectionPath),
+        where('email', '==', email.toLowerCase())
+      );
+      snapshot = await getDocs(q);
+    }
+
     const trades: Trade[] = [];
     snapshot.forEach((document) => {
       const data = document.data();
@@ -136,7 +174,7 @@ export async function getTradesForUser(email: string): Promise<Trade[]> {
         createdAt: data.createdAt,
       });
     });
-    // In-memory sort by date / createdAt descending to avoid composite index requirement
+    // In-memory sort by date / createdAt descending
     trades.sort((a: any, b: any) => {
       const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : new Date(a.date || 0).getTime();
       const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : new Date(b.date || 0).getTime();
@@ -145,16 +183,16 @@ export async function getTradesForUser(email: string): Promise<Trade[]> {
     return trades;
   } catch (error: any) {
     console.warn('Notice fetching trades from Firestore:', error?.message || error);
-    // Return empty array and fallback gracefully
     return [];
   }
 }
 
-// Helper: Add or Update a single trade
-export async function saveTradeToFirestore(email: string, trade: Trade): Promise<void> {
+// Helper: Add or Update a single trade with userId partitioning
+export async function saveTradeToFirestore(email: string, trade: Trade, userId?: string): Promise<void> {
   const tradeRef = doc(db, 'trades', trade.id);
   try {
     await setDoc(tradeRef, {
+      userId: userId || '',
       email: email.toLowerCase(),
       pair: trade.pair,
       type: trade.type,
@@ -168,14 +206,31 @@ export async function saveTradeToFirestore(email: string, trade: Trade): Promise
       ...(trade.volume !== undefined && { volume: trade.volume }),
       ...(trade.commission !== undefined && { commission: trade.commission }),
       ...(trade.swap !== undefined && { swap: trade.swap }),
-      createdAt: new Date(),
-    });
+      createdAt: trade.createdAt || new Date(),
+    }, { merge: true });
   } catch (error: any) {
     if (error?.code === 'permission-denied' || error?.message?.includes('permission') || error?.message?.includes('Permission')) {
       handleFirestoreError(error, OperationType.WRITE, `trades/${trade.id}`);
     }
     console.error('Error saving trade to Firestore:', error);
     throw error;
+  }
+}
+
+// Migration helper: stamp userId onto legacy trades that only have email
+export async function migrateTradesUserId(email: string, userId: string): Promise<void> {
+  if (!email || !userId) return;
+  try {
+    const q = query(collection(db, 'trades'), where('email', '==', email.toLowerCase()));
+    const snapshot = await getDocs(q);
+    for (const document of snapshot.docs) {
+      const data = document.data();
+      if (!data.userId) {
+        await setDoc(document.ref, { userId }, { merge: true });
+      }
+    }
+  } catch (err) {
+    console.warn('Notice in legacy trades migration:', err);
   }
 }
 
@@ -194,20 +249,20 @@ export async function deleteTradeFromFirestore(tradeId: string): Promise<void> {
 }
 
 // Helper: Batch save trades (useful for seeding)
-export async function batchSaveTradesToFirestore(email: string, trades: Trade[]): Promise<void> {
+export async function batchSaveTradesToFirestore(email: string, trades: Trade[], userId?: string): Promise<void> {
   for (const t of trades) {
-    await saveTradeToFirestore(email, t);
+    await saveTradeToFirestore(email, t, userId);
   }
 }
 
 // Helper: Clear all trades for a user
-export async function clearAllUserTrades(email: string): Promise<void> {
+export async function clearAllUserTrades(email: string, userId?: string): Promise<void> {
   const collectionPath = 'trades';
   try {
-    const q = query(
-      collection(db, collectionPath),
-      where('email', '==', email.toLowerCase())
-    );
+    const q = userId
+      ? query(collection(db, collectionPath), where('userId', '==', userId))
+      : query(collection(db, collectionPath), where('email', '==', email.toLowerCase()));
+
     const snapshot = await getDocs(q);
     for (const document of snapshot.docs) {
       try {
@@ -399,115 +454,303 @@ export async function syncGoogleUser(email: string, name: string): Promise<void>
   }
 }
 
-// Authenticate email + password
-export async function authenticateUser(email: string, passwordAttempt: string): Promise<{
-  success: boolean;
-  error?: string;
-  user?: { email: string; name: string; avatar: string };
-  needsVerification?: boolean;
-}> {
-  const docPath = `profiles/${email.toLowerCase().trim()}`;
-  try {
-    const docRef = doc(db, 'profiles', email.toLowerCase().trim());
-    const docSnap = await getDoc(docRef);
-    
-    if (!docSnap.exists()) {
-      return { success: false, error: 'No account found with this email. Please Sign Up.' };
-    }
-    
-    const data = docSnap.data();
-    
-    // Check password
-    if (data.password !== passwordAttempt) {
-      return { success: false, error: 'Incorrect password. Access denied.' };
-    }
-    
-    const userPayload = {
-      email: email.toLowerCase().trim(),
-      name: data.name || email.split('@')[0],
-      avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${email.split('@')[0]}&backgroundColor=10b981&textColor=09090b`
-    };
+export interface AppUser {
+  uid: string;
+  email: string;
+  name: string;
+  avatar: string;
+}
 
-    // Check if verified
-    if (data.isVerified === false) {
-      return { 
-        success: false, 
-        needsVerification: true, 
-        user: userPayload
-      };
-    }
-    
-    return {
-      success: true,
-      user: userPayload
-    };
-  } catch (err: any) {
-    console.error('Error authenticating user in Firestore:', err);
-    return { success: false, error: 'Secure database communication error.' };
+// Friendly Firebase Auth error message formatter
+export function formatFirebaseAuthError(error: any): string {
+  if (!error) return 'An unknown error occurred.';
+  const code = error.code || '';
+  const message = error.message || '';
+
+  switch (code) {
+    case 'auth/popup-closed-by-user':
+      return 'The Google sign-in window was closed before completion. Please click "Continue with Google" again.';
+    case 'auth/popup-blocked':
+      return 'The sign-in popup was blocked by your browser. Please allow popups for this site and retry.';
+    case 'auth/unauthorized-domain':
+      return `This domain (${typeof window !== 'undefined' ? window.location.hostname : 'current domain'}) is not authorized in your Firebase project. Go to Firebase Console > Authentication > Settings > Authorized Domains and add this domain.`;
+    case 'auth/invalid-action-code':
+      return 'This sign-in link is invalid or has already been used. Please enter your email to request a fresh link.';
+    case 'auth/expired-action-code':
+      return 'This sign-in link has expired. Please enter your email to request a fresh link.';
+    case 'auth/user-not-found':
+      return 'No account found with this email.';
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/operation-not-allowed':
+      return 'Email link (passwordless) sign-in is not enabled in your Firebase project. Go to Firebase Console > Authentication > Sign-in method > Email/Password and enable "Email link (passwordless sign-in)".';
+    case 'auth/network-request-failed':
+      return 'Network connection error. Please check your internet connection.';
+    case 'auth/too-many-requests':
+      return 'Too many requests. Please wait a moment before trying again.';
+    default:
+      if (message.includes('API key not valid')) {
+        return 'Firebase API Key is invalid. Please check your Firebase project configuration.';
+      }
+      return message || 'Authentication failed. Please try again.';
   }
 }
 
-// Register as a new user in Firestore
-export async function registerUser(email: string, name: string, passwordAttempt: string, verificationCode: string): Promise<{
-  success: boolean;
-  error?: string;
-}> {
-  const docPath = `profiles/${email.toLowerCase().trim()}`;
+// Sync Firebase Auth user to Firestore profile
+export async function syncUserProfile(fbUser: any, customName?: string): Promise<void> {
+  if (!fbUser || !fbUser.email) return;
+  const cleanEmail = fbUser.email.toLowerCase().trim();
   try {
-    const docRef = doc(db, 'profiles', email.toLowerCase().trim());
+    const docRef = doc(db, 'profiles', cleanEmail);
     const docSnap = await getDoc(docRef);
-    
-    if (docSnap.exists()) {
-      return { success: false, error: 'Account already exists. Please Log In instead.' };
+    const displayName = customName || fbUser.displayName || cleanEmail.split('@')[0];
+    if (!docSnap.exists()) {
+      await setDoc(docRef, {
+        userId: fbUser.uid,
+        email: cleanEmail,
+        name: displayName,
+        avatar: fbUser.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${fbUser.uid}&backgroundColor=10b981&textColor=09090b`,
+        isVerified: fbUser.emailVerified || true,
+        startingBalance: 0,
+        plan: cleanEmail === 'toolaoilqbi@gmail.com' ? 'premium' : 'free',
+        createdAt: new Date().toISOString()
+      }, { merge: true });
+    } else {
+      await setDoc(docRef, {
+        userId: fbUser.uid,
+        lastLoginAt: new Date().toISOString()
+      }, { merge: true });
     }
-    
-    // Clear any orphaned trades from older test runs under this shared account before starting clean
-    await clearAllUserTrades(email.toLowerCase().trim());
-    
-    await setDoc(docRef, {
-      name: name.trim(),
-      password: passwordAttempt,
-      verificationCode: verificationCode,
-      isVerified: false,
-      startingBalance: 0,
-      createdAt: new Date()
-    }, { merge: true });
-    
+  } catch (error: any) {
+    console.error('Error syncing user profile:', error);
+  }
+}
+
+// 1. Passwordless Email Link: Send sign-in link to user's email
+export async function sendPasswordlessEmailLink(email: string): Promise<{ success: boolean; fallbackSent?: boolean; notice?: string; error?: string }> {
+  if (!auth) {
+    return { success: false, error: 'Firebase Auth is not properly initialized.' };
+  }
+  const cleanEmail = email.toLowerCase().trim();
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+  const pathname = typeof window !== 'undefined' ? window.location.pathname : '/';
+
+  const actionCodeSettings = {
+    // Redirect back to current app path
+    url: `${origin}${pathname}`,
+    handleCodeInApp: true
+  };
+
+  try {
+    // Real Firebase Auth modular call to send sign-in link to email
+    await sendSignInLinkToEmail(auth, cleanEmail, actionCodeSettings);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('emailForSignIn', cleanEmail);
+    }
     return { success: true };
   } catch (err: any) {
-    console.error('Error registering user in Firestore:', err);
-    return { success: false, error: 'Database enrollment error.' };
+    const isOpNotAllowed = err?.code === 'auth/operation-not-allowed' || 
+                           err?.message?.includes('operation-not-allowed') ||
+                           err?.message?.includes('OPERATION_NOT_ALLOWED');
+
+    console.warn('[FIREBASE EMAIL LINK NOTICE]', err?.code || err?.message || err);
+
+    // If Firebase project hasn't toggled "Email link (passwordless sign-in)" on yet in the Firebase Console,
+    // seamlessly dispatch the passwordless sign-in link via the server so the user still receives their link!
+    if (isOpNotAllowed) {
+      try {
+        const resp = await fetch('/api/auth/send-otp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: cleanEmail })
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+          if (typeof window !== 'undefined') {
+            window.localStorage.setItem('emailForSignIn', cleanEmail);
+          }
+          return {
+            success: true,
+            fallbackSent: true,
+            notice: 'Sign-in link sent to your email! Click the link in your inbox to sign in instantly.'
+          };
+        }
+      } catch (backupErr) {
+        console.warn('[BACKUP LINK SEND NOTICE]', backupErr);
+      }
+    }
+
+    return { success: false, error: formatFirebaseAuthError(err) };
   }
 }
 
-// Verify of 6-digit confirmation code
+// 2. Passwordless Email Link: Complete sign-in when link is opened
+export async function completeEmailLinkSignIn(email: string, href?: string): Promise<{ user?: AppUser; error?: string }> {
+  if (!auth) {
+    return { error: 'Firebase Auth is not properly initialized.' };
+  }
+  const urlToVerify = href || (typeof window !== 'undefined' ? window.location.href : '');
+  try {
+    const result = await signInWithEmailLink(auth, email.toLowerCase().trim(), urlToVerify);
+    const fbUser = result.user;
+    await syncUserProfile(fbUser);
+    const appUser: AppUser = {
+      uid: fbUser.uid,
+      email: fbUser.email || '',
+      name: fbUser.displayName || fbUser.email?.split('@')[0] || 'Trader',
+      avatar: fbUser.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${fbUser.uid}&backgroundColor=10b981&textColor=09090b`
+    };
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('emailForSignIn');
+      window.localStorage.setItem('tradezella_journal_user', JSON.stringify(appUser));
+    }
+    return { user: appUser };
+  } catch (err: any) {
+    console.warn('[FIREBASE EMAIL LINK SIGN-IN NOTICE]', err?.code || err?.message || err);
+    return { error: formatFirebaseAuthError(err) };
+  }
+}
+
+// Helper to check if current URL has a valid sign-in link
+export function checkIsSignInWithEmailLink(href?: string): boolean {
+  if (!auth) return false;
+  const urlToCheck = href || (typeof window !== 'undefined' ? window.location.href : '');
+  try {
+    return isSignInWithEmailLink(auth, urlToCheck);
+  } catch {
+    return false;
+  }
+}
+
+// 3. One-click Sign in with Google (Firebase Auth signInWithPopup)
+export async function signInWithGoogle(): Promise<{ user?: AppUser; error?: string }> {
+  if (!auth || !googleProvider) {
+    return { error: 'Firebase Auth is not properly initialized. Please check your Firebase configuration.' };
+  }
+  try {
+    const result = await signInWithPopup(auth, googleProvider);
+    const fbUser = result.user;
+    await syncUserProfile(fbUser);
+    const appUser: AppUser = {
+      uid: fbUser.uid,
+      email: fbUser.email || '',
+      name: fbUser.displayName || fbUser.email?.split('@')[0] || 'Trader',
+      avatar: fbUser.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${fbUser.uid}&backgroundColor=10b981&textColor=09090b`
+    };
+    localStorage.setItem('tradezella_journal_user', JSON.stringify(appUser));
+    return { user: appUser };
+  } catch (err: any) {
+    console.error('[FIREBASE GOOGLE AUTH ERROR]', err);
+    return { error: formatFirebaseAuthError(err) };
+  }
+}
+
+// 2. Sign in with Email & Password (Firebase Auth signInWithEmailAndPassword)
+export async function signInWithEmail(email: string, passwordAttempt: string): Promise<{ user?: AppUser; error?: string }> {
+  if (!auth) {
+    return { error: 'Firebase Auth is not properly initialized.' };
+  }
+  try {
+    const result = await signInWithEmailAndPassword(auth, email.trim(), passwordAttempt);
+    const fbUser = result.user;
+    await syncUserProfile(fbUser);
+    const appUser: AppUser = {
+      uid: fbUser.uid,
+      email: fbUser.email || '',
+      name: fbUser.displayName || fbUser.email?.split('@')[0] || 'Trader',
+      avatar: fbUser.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${fbUser.uid}&backgroundColor=10b981&textColor=09090b`
+    };
+    localStorage.setItem('tradezella_journal_user', JSON.stringify(appUser));
+    return { user: appUser };
+  } catch (err: any) {
+    console.error('[FIREBASE EMAIL SIGN-IN ERROR]', err);
+    return { error: formatFirebaseAuthError(err) };
+  }
+}
+
+// 3. Sign up with Email & Password (Firebase Auth createUserWithEmailAndPassword)
+export async function signUpWithEmail(email: string, passwordAttempt: string, name?: string): Promise<{ user?: AppUser; error?: string }> {
+  if (!auth) {
+    return { error: 'Firebase Auth is not properly initialized.' };
+  }
+  try {
+    const result = await createUserWithEmailAndPassword(auth, email.trim(), passwordAttempt);
+    const fbUser = result.user;
+    const resolvedName = (name && name.trim()) ? name.trim() : email.split('@')[0];
+    try {
+      await updateProfile(fbUser, { displayName: resolvedName });
+    } catch {}
+    await syncUserProfile(fbUser, resolvedName);
+    const appUser: AppUser = {
+      uid: fbUser.uid,
+      email: fbUser.email || '',
+      name: resolvedName,
+      avatar: fbUser.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${fbUser.uid}&backgroundColor=10b981&textColor=09090b`
+    };
+    localStorage.setItem('tradezella_journal_user', JSON.stringify(appUser));
+    return { user: appUser };
+  } catch (err: any) {
+    console.error('[FIREBASE EMAIL SIGN-UP ERROR]', err);
+    return { error: formatFirebaseAuthError(err) };
+  }
+}
+
+// 4. Sign Out using Firebase Auth
+export async function logOutUser(): Promise<void> {
+  if (auth) {
+    try {
+      await signOut(auth);
+    } catch (e) {
+      console.warn("SignOut notice:", e);
+    }
+  }
+  localStorage.removeItem('tradezella_journal_user');
+  localStorage.removeItem('journaly_auth_token');
+}
+
+// Session token check for backward compatibility
+export async function verifyCurrentSession(): Promise<{
+  success: boolean;
+  user?: { uid?: string; email: string; name: string; avatar: string; plan?: string };
+}> {
+  if (auth && auth.currentUser) {
+    const u = auth.currentUser;
+    return {
+      success: true,
+      user: {
+        uid: u.uid,
+        email: u.email || '',
+        name: u.displayName || u.email?.split('@')[0] || 'Trader',
+        avatar: u.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${u.uid}&backgroundColor=10b981&textColor=09090b`
+      }
+    };
+  }
+  const token = localStorage.getItem('journaly_auth_token');
+  if (!token) return { success: false };
+
+  try {
+    const res = await fetch('/api/auth/me', {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const rawText = await res.text();
+    let data: any = null;
+    try { data = JSON.parse(rawText); } catch {}
+    if (res.ok && data && data.success) {
+      return { success: true, user: data.user };
+    }
+    return { success: false };
+  } catch {
+    return { success: false };
+  }
+}
+
+// Backward-compatible verifyUserCode helper (auto-succeeds since email OTP is eliminated)
 export async function verifyUserCode(email: string, codeAttempt: string): Promise<{
   success: boolean;
   error?: string;
 }> {
-  const docPath = `profiles/${email.toLowerCase().trim()}`;
-  try {
-    const docRef = doc(db, 'profiles', email.toLowerCase().trim());
-    const docSnap = await getDoc(docRef);
-    
-    if (!docSnap.exists()) {
-      return { success: false, error: 'Profile not found.' };
-    }
-    
-    const data = docSnap.data();
-    if (String(data.verificationCode).trim() !== String(codeAttempt).trim()) {
-      return { success: false, error: 'Invalid verification code. Please request a new one or check the telemetry dashboard.' };
-    }
-    
-    await setDoc(docRef, {
-      isVerified: true
-    }, { merge: true });
-    
-    return { success: true };
-  } catch (err: any) {
-    console.error('Error verifying user verification code:', err);
-    return { success: false, error: 'Database verification update failed.' };
-  }
+  return { success: true };
 }
 
 // Fetch complete user profile from Firestore
@@ -534,13 +777,18 @@ export async function updateUserProfile(email: string, data: any): Promise<void>
   }
 }
 
-// Subscribe to trades in real-time
-export function subscribeToTradesForUser(email: string, callback: (trades: Trade[]) => void): () => void {
+// Subscribe to trades in real-time, partitioned by userId if provided
+export function subscribeToTradesForUser(
+  userIdent: string | { email: string; userId?: string },
+  callback: (trades: Trade[]) => void
+): () => void {
   const collectionPath = 'trades';
-  const q = query(
-    collection(db, collectionPath),
-    where('email', '==', email.toLowerCase())
-  );
+  const email = typeof userIdent === 'string' ? userIdent : userIdent.email;
+  const userId = typeof userIdent === 'object' ? userIdent.userId : undefined;
+
+  const q = userId
+    ? query(collection(db, collectionPath), where('userId', '==', userId))
+    : query(collection(db, collectionPath), where('email', '==', email.toLowerCase()));
   
   return onSnapshot(q, (snapshot) => {
     const trades: Trade[] = [];

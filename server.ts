@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import sendCodeHandler from "./api/send-code.ts";
 import { handleGetConfig, handleConnectAccount, handleSyncAccount, handleConnectMT5, handleStatusAccount, handleConnectMockSandbox } from "./api/mt5.ts";
 import { handleInitializePaystack, handleVerifyPaystack } from "./api/paystack.ts";
+import { handleRegister, handleLogin, handleMe, handleLogout, handleSendOtp, handleVerifyOtp, handleVerifyToken } from "./api/auth.ts";
 
 dotenv.config();
 
@@ -28,6 +29,16 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// Passwordless email-only authentication endpoints
+app.post("/api/auth/send-otp", handleSendOtp);
+app.post("/api/auth/verify-otp", handleVerifyOtp);
+app.post("/api/auth/verify-token", handleVerifyToken);
+app.get("/api/auth/me", handleMe);
+app.post("/api/auth/logout", handleLogout);
+// Backward compatible legacy auth endpoints
+app.post("/api/auth/register", handleRegister);
+app.post("/api/auth/login", handleLogin);
 
 // API routing for secure, backend-initiated SMTP verification mails - unified with Vercel function
 app.post("/api/send-code", sendCodeHandler);

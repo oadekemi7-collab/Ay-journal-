@@ -28,11 +28,15 @@ interface MT5ConnectionPanelProps {
   mt5Broker: string;
   mt5Balance: number | null;
   mt5Equity: number | null;
+  calculatedBalance?: number;
+  calculatedEquity?: number;
+  tradesCount?: number;
   isSyncing: boolean;
   onSync: () => Promise<void>;
   onConnected: (accountId: string, name: string) => void;
   onDisconnected: () => void;
   onOpenUpgradeModal: () => void;
+  onOpenBalanceModal?: () => void;
 }
 
 export default function MT5ConnectionPanel({
@@ -275,6 +279,8 @@ export default function MT5ConnectionPanel({
                   mt5Connected: true,
                   mt5AccountId: statusData.accountId,
                   mt5Broker: statusData.accountInfo?.broker || broker || statusData.broker || statusData.name || "MetaTrader Broker Link",
+                  ...(login.trim() ? { mt5Login: login.trim() } : {}),
+                  ...(server.trim() ? { mt5Server: server.trim() } : {}),
                   mt5Balance: statusData.accountInfo?.balance || statusData.balance || 0,
                   mt5Equity: statusData.accountInfo?.equity || statusData.equity || 0,
                   mt5SyncedAt: new Date().toISOString()
@@ -312,6 +318,8 @@ export default function MT5ConnectionPanel({
             mt5Connected: true,
             mt5AccountId: data.accountId,
             mt5Broker: data.accountInfo?.broker || broker || data.broker || data.name || "MetaTrader Broker Link",
+            ...(login.trim() ? { mt5Login: login.trim() } : {}),
+            ...(server.trim() ? { mt5Server: server.trim() } : {}),
             mt5Balance: data.accountInfo?.balance || data.balance || 0,
             mt5Equity: data.accountInfo?.equity || data.equity || 0,
             mt5SyncedAt: new Date().toISOString()
