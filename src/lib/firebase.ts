@@ -42,15 +42,16 @@ const getEnvVal = (key: string): string | undefined => {
   } catch (e) {}
   return undefined;
 };
-
 const firebaseConfig = {
-  apiKey: getEnvVal("FIREBASE_API_KEY") || ["AIza", "SyD", "cGbr", "HYi5i", "Z6VjAYY", "_lvdve6", "pc71An9QM"].join(""),
-  authDomain: getEnvVal("FIREBASE_AUTH_DOMAIN") || "ringed-cable-xdpgw.firebaseapp.com",
-  projectId: getEnvVal("FIREBASE_PROJECT_ID") || "ringed-cable-xdpgw",
-  storageBucket: getEnvVal("FIREBASE_STORAGE_BUCKET") || "ringed-cable-xdpgw.firebasestorage.app",
-  messagingSenderId: getEnvVal("FIREBASE_MESSAGING_SENDER_ID") || "574146164237",
-  appId: getEnvVal("FIREBASE_APP_ID") || "1:574146164237:web:e35ebfbaf1e31cd0148744"
+  apiKey: "AIzaSyDwppIVVeV7-kVMVFwlPnZDkgURuHwQHsM",
+  authDomain: "journaly-e1308.firebaseapp.com",
+  projectId: "journaly-e1308",
+  storageBucket: "journaly-e1308.firebasestorage.app",
+  messagingSenderId: "182938747569",
+  appId: "1:182938747569:web:183e66a523ef7cf7ba5890",
+  measurementId: "G-XERMCWMPE6"
 };
+
 
 let app: any;
 let db: any;
