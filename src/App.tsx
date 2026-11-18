@@ -50,6 +50,8 @@ import {
   migrateTradesUserId
 } from './lib/firebase';
 
+const FREE_MODE = true;
+
 const generateDemoTrades = (): Trade[] => {
   const today = new Date();
   
@@ -239,7 +241,7 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const reference = params.get('reference') || params.get('trxref');
     
-    if (reference && user) {
+    if (!FREE_MODE && reference && user) {
       const verifyPayment = async () => {
         setPaystackVerifying(true);
         setPaystackVerifyError(null);
@@ -455,7 +457,7 @@ export default function App() {
 
   // Trigger silent automatic background sync when MT5 is connected
   useEffect(() => {
-    if (user && userPlan === 'premium' && mt5Connected && mt5AccountId) {
+    if (user && (FREE_MODE || userPlan === 'premium') && mt5Connected && mt5AccountId) {
       // Sync immediately
       handleSyncMT5(true);
 
@@ -824,7 +826,7 @@ export default function App() {
                   Journaly
                 </h1>
                 <span className="text-[9px] uppercase font-bold text-emerald-400 border border-emerald-550/30 px-1 py-0.5 rounded leading-none">
-                  Prop Elite
+                  {FREE_MODE ? 'FREE' : 'Prop Elite'}
                 </span>
               </div>
               <p className="text-[10px] text-emerald-400 font-extrabold tracking-wider uppercase">Trade. Review. Improve.</p>
@@ -904,7 +906,7 @@ export default function App() {
         <section aria-label="MetaTrader Sync Connection" id="section-mt5-sync-panel">
           <MT5ConnectionPanel 
             email={user.email}
-            isPremium={userPlan === 'premium'}
+            isPremium={FREE_MODE || userPlan === 'premium'}
             mt5Connected={mt5Connected}
             mt5AccountId={mt5AccountId}
             mt5Broker={mt5Broker}
@@ -937,7 +939,7 @@ export default function App() {
               });
               triggerNotification("Disconnected MetaTrader 5 broker link and cleared synced trades.");
             }}
-            onOpenUpgradeModal={() => setShowUpgradeModal(true)}
+            onOpenUpgradeModal={() => { if (!FREE_MODE) setShowUpgradeModal(true); }}
           />
         </section>
 
@@ -1053,7 +1055,7 @@ export default function App() {
       )}
 
       {/* Subscription Checkout Modal */}
-      {showUpgradeModal && (
+      {!FREE_MODE && showUpgradeModal && (
         <SubscriptionModal 
           email={user.email}
           onClose={() => setShowUpgradeModal(false)}
@@ -1065,7 +1067,7 @@ export default function App() {
       )}
 
       {/* Paystack Server-Side Verification Dialog Overlay */}
-      {(paystackVerifying || paystackVerifyError || paystackVerifySuccess) && (
+      {!FREE_MODE && (paystackVerifying || paystackVerifyError || paystackVerifySuccess) && (
         <div className="fixed inset-0 bg-zinc-950/90 backdrop-blur-md z-50 flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md p-6 text-center space-y-6 shadow-2xl relative overflow-hidden">
             <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-500" />

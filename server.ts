@@ -1,6 +1,5 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import sendCodeHandler from "./api/send-code.ts";
 import { handleGetConfig, handleConnectAccount, handleSyncAccount, handleConnectMT5, handleStatusAccount, handleConnectMockSandbox } from "./api/mt5.ts";
@@ -56,14 +55,28 @@ app.post("/api/mt5/connect-mock", handleConnectMockSandbox);
 app.post("/api/paystack/initialize", handleInitializePaystack);
 app.post("/api/paystack/verify", handleVerifyPaystack);
 
-// Configure Vite integration
-async function startServer() {
+// Configure Vite integration without blocking initial port binding
+function startServer() {
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true, allowedHosts: true },
-      appType: "spa",
+    const viteReadyPromise = import("vite").then(({ createServer: createViteServer }) =>
+      createViteServer({
+        server: { middlewareMode: true, allowedHosts: true },
+        appType: "spa",
+      })
+    );
+
+    viteReadyPromise.catch((err) => {
+      console.error("Failed to initialize Vite dev server:", err);
     });
-    app.use(vite.middlewares);
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = await viteReadyPromise;
+        return vite.middlewares(req, res, next);
+      } catch (err) {
+        return next(err);
+      }
+    });
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
@@ -72,12 +85,14 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  server.on("error", (err) => {
+    console.error("Server failed to listen:", err);
+    process.exit(1);
   });
 }
 
-startServer().catch((err) => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
-});
+startServer();
